@@ -6,15 +6,16 @@
 #   - Tier 2 (this workflow) runs smoke + integration + release-validation
 #     against the tentative merge commit that the merge queue creates.
 #
-# Skip-on-PR pattern:
-#   - This workflow ALSO triggers on `pull_request` so that the required check
-#     names below report at PR time. On PR events every job is skipped via
-#     `if: github.event_name == 'merge_group'`. Skipped jobs report a `skipped`
-#     conclusion which GitHub branch protection treats as success, satisfying
-#     the required-status-check gate without burning runner minutes.
-#   - On merge_group events the same jobs run for real and gate the queue.
-#   - This is the canonical way to make merge-queue-only checks compatible with
-#     branch protection's required-checks list.
+# Required-check satisfaction on PR commits:
+#   - The four required check names produced here (Build (Linux), Smoke Test
+#     (Linux), Integration Tests (Linux), Release Validation (Linux)) are also
+#     produced by `ci-integration-pr-stub.yml` on `pull_request_target` events
+#     so branch protection's required-check gate is satisfied at PR time
+#     without burning runner minutes.
+#   - This workflow intentionally does NOT trigger on pull_request events.
+#     Doing so would let a fork PR check out and run code with the secrets
+#     declared below, which is a supply-chain attack vector. Keep this file
+#     `merge_group`-only forever.
 #
 # Trust model:
 #   - merge_group only fires when a user with write access enqueues a PR.
@@ -22,8 +23,8 @@
 #     main and is created by GitHub, not by the contributor.
 #   - Trust boundary = write-access grant, managed in repo settings.
 #     Write access is granted only to vetted contributors.
-#   - Fork PRs without write access never reach the merge_group path of this
-#     workflow and never see CI secrets. The PR-event path runs no real steps.
+#   - Fork PRs without write access never reach this workflow and never see
+#     CI secrets.
 #
 # Binary is built inline rather than downloaded from ci.yml so this workflow
 # tests exactly the merge-queue tentative merge SHA without cross-workflow
@@ -34,8 +35,6 @@ env:
   PYTHON_VERSION: '3.12'
 
 on:
-  pull_request:
-    branches: [ main ]
   merge_group:
     branches: [ main ]
     types: [ checks_requested ]
@@ -46,7 +45,6 @@ permissions:
 jobs:
   build:
     name: Build (Linux)
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +86,6 @@ jobs:
   smoke-test:
     name: Smoke Test (Linux)
     needs: [build]
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +112,6 @@ jobs:
   integration-tests:
     name: Integration Tests (Linux)
     needs: [build, smoke-test]
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -162,7 +158,6 @@ jobs:
   release-validation:
     name: Release Validation (Linux)
     needs: [build, integration-tests]
-    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout test scripts
