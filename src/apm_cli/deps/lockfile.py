@@ -446,6 +446,7 @@ class LockFile:
         lock = cls(apm_version=apm_version)
 
         for entry in installed_packages:
+            registry_resolution = None
             if isinstance(entry, InstalledPackage):
                 dep_ref = entry.dep_ref
                 resolved_commit = entry.resolved_commit
@@ -453,6 +454,7 @@ class LockFile:
                 resolved_by = entry.resolved_by
                 is_dev = entry.is_dev
                 registry_config = getattr(entry, "registry_config", None)
+                registry_resolution = getattr(entry, "registry_resolution", None)
             elif len(entry) >= 5:
                 dep_ref, resolved_commit, depth, resolved_by, is_dev = entry[:5]
                 registry_config = None
@@ -468,6 +470,7 @@ class LockFile:
                 resolved_by=resolved_by,
                 is_dev=is_dev,
                 registry_config=registry_config,
+                registry_resolution=registry_resolution,
             )
             lock.add_dependency(locked_dep)
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from apm_cli.deps.registry.resolver import RegistryResolution
     from apm_cli.deps.registry_proxy import RegistryConfig
     from apm_cli.models.dependency.reference import DependencyReference
 
@@ -44,6 +45,13 @@ class InstalledPackage:
         when this package was downloaded, or ``None`` for direct VCS installs.
         When present, the lockfile stores the proxy host (FQDN) and prefix so
         that subsequent installs replay through the same proxy.
+    registry_resolution:
+        The :class:`~apm_cli.deps.registry.resolver.RegistryResolution` produced
+        by the dedicated-registry resolver, or ``None`` for git/local/proxy
+        installs. When present, the lockfile records ``resolved_url`` /
+        ``resolved_hash`` / ``version`` from it so re-installs verify against
+        the same content (design §6.1). Distinct concept from ``registry_config``
+        (Artifactory VCS proxy).
     """
 
     dep_ref: "DependencyReference"
@@ -52,3 +60,4 @@ class InstalledPackage:
     resolved_by: Optional[str]
     is_dev: bool = False
     registry_config: "Optional[RegistryConfig]" = None
+    registry_resolution: "Optional[RegistryResolution]" = None

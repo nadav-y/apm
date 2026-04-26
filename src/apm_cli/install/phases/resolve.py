@@ -25,6 +25,24 @@ if TYPE_CHECKING:
     from apm_cli.install.context import InstallContext
 
 
+def _lockfile_has_registry_deps(existing_lockfile) -> bool:
+    """True when the on-disk lockfile records at least one registry-sourced dep.
+
+    Used to construct the registry resolver even when apm.yml's
+    ``registries:`` block has been removed but locked deps still need to
+    re-install. A user clones a repo, the apm.yml has no registries: block
+    but the lockfile says some deps are ``source: registry`` — we still
+    want them to install (they'll fail at auth lookup if the URL doesn't
+    match anything configured, with a clear remediation per §6.2).
+    """
+    if not existing_lockfile:
+        return False
+    return any(
+        dep.source == "registry"
+        for dep in existing_lockfile.dependencies.values()
+    )
+
+
 def run(ctx: "InstallContext") -> None:
     """Execute the resolve phase.
 
@@ -97,6 +115,25 @@ def run(ctx: "InstallContext") -> None:
     ctx.downloader = downloader
 
     # ------------------------------------------------------------------
+    # 3b. Dedicated registry resolver (design §3.1, §8)
+    # ------------------------------------------------------------------
+    # Built when:
+    #   - the manifest's apm.yml has a top-level ``registries:`` block, OR
+    #   - the on-disk lockfile has at least one ``source: registry`` entry
+    #     (re-install of a project whose authors removed the block but the
+    #     locked deps still need somewhere to land).
+    # In the second case the URL is the trust anchor — auth resolves by
+    # URL prefix against the apm.yml registries map (which may be empty,
+    # forcing anonymous fetch).
+    registry_resolver = None
+    registries_map = getattr(ctx.apm_package, "registries", None) or {}
+    needs_registry = bool(registries_map) or _lockfile_has_registry_deps(existing_lockfile)
+    if needs_registry:
+        from apm_cli.deps.registry.resolver import RegistryPackageResolver
+        registry_resolver = RegistryPackageResolver(registries_map)
+    ctx.registry_resolver = registry_resolver
+
+    # ------------------------------------------------------------------
     # 4. Tracking variables (phase-local except where noted)
     # ------------------------------------------------------------------
     # direct_dep_keys is phase-local (only read inside download_callback)
@@ -132,6 +169,32 @@ def run(ctx: "InstallContext") -> None:
         if install_path.exists():
             return install_path
         try:
+            # ─── Registry-sourced dep (design §8) ──────────────────────
+            # Routed before local/git so the registry resolver owns the
+            # download for source=="registry" entries. Lockfile re-installs
+            # may arrive with registry_name=None — look it up by URL prefix
+            # against the configured registries map.
+            if dep_ref.source == "registry":
+                if registry_resolver is None:
+                    raise RuntimeError(
+                        f"dep {dep_ref.repo_url!r} is registry-sourced but no "
+                        f"registries: block is configured in apm.yml and the "
+                        f"lockfile carries no resolved_url for it."
+                    )
+                if dep_ref.registry_name is None and existing_lockfile:
+                    from apm_cli.deps.registry.auth import lookup_name_for_url
+                    from dataclasses import replace as _dc_replace
+                    locked = existing_lockfile.get_dependency(dep_ref.get_unique_key())
+                    if locked and locked.resolved_url and registries_map:
+                        name = lookup_name_for_url(locked.resolved_url, registries_map)
+                        if name:
+                            dep_ref = _dc_replace(dep_ref, registry_name=name)
+                registry_resolver.download_package(dep_ref, install_path)
+                # Mark as already-downloaded so the parallel pre-download
+                # phase skips this dep. No SHA for registry deps.
+                callback_downloaded[dep_ref.get_unique_key()] = None
+                return install_path
+
             # Handle local packages: copy instead of git clone
             if dep_ref.is_local and dep_ref.local_path:
                 if scope is InstallScope.USER:

@@ -351,10 +351,24 @@ class CachedDependencySource(DependencySource):
         elif ctx.registry_config and not dep_ref.is_local:
             _cached_registry = ctx.registry_config
 
+        # Registry-sourced cached dep: preserve the lockfile's resolved_url
+        # + resolved_hash + version across re-installs by synthesizing a
+        # RegistryResolution from the existing locked entry. Without this,
+        # the lockfile would lose those fields on every cache-hit re-install.
+        _cached_resolution = None
+        if dep_ref.source == "registry" and dep_locked_chk and dep_locked_chk.resolved_url:
+            from apm_cli.deps.registry.resolver import RegistryResolution
+            _cached_resolution = RegistryResolution(
+                resolved_url=dep_locked_chk.resolved_url,
+                resolved_hash=dep_locked_chk.resolved_hash or "",
+                version=dep_locked_chk.version or (dep_ref.reference or ""),
+            )
+
         ctx.installed_packages.append(InstalledPackage(
             dep_ref=dep_ref, resolved_commit=cached_commit,
             depth=depth, resolved_by=resolved_by, is_dev=_is_dev,
             registry_config=_cached_registry,
+            registry_resolution=_cached_resolution,
         ))
         if install_path.is_dir():
             ctx.package_hashes[dep_key] = _compute_hash(install_path)
@@ -434,6 +448,33 @@ class FreshDependencySource(DependencySource):
 
             if dep_key in ctx.pre_download_results:
                 package_info = ctx.pre_download_results[dep_key]
+            elif dep_ref.source == "registry":
+                # Registry-sourced dep: dispatch to the dedicated-registry
+                # resolver instead of the GitHub downloader. This branch
+                # fires when (a) the BFS callback skipped due to existing
+                # install path on a re-install, or (b) parallel pre-download
+                # was skipped (registry deps aren't pre-downloaded).
+                _registry_resolver = getattr(ctx, "registry_resolver", None)
+                if _registry_resolver is None:
+                    raise RuntimeError(
+                        f"dep {dep_ref.repo_url!r} is registry-sourced but "
+                        f"no registry resolver was constructed (apm.yml may "
+                        f"be missing a 'registries:' block)."
+                    )
+                # Lockfile re-install path: registry_name might be absent —
+                # look it up from the lockfile's resolved_url.
+                if download_ref.source == "registry" and download_ref.registry_name is None:
+                    from apm_cli.deps.registry.auth import lookup_name_for_url
+                    from dataclasses import replace as _dc_replace
+                    if dep_locked_chk and dep_locked_chk.resolved_url:
+                        _regs = getattr(ctx.apm_package, "registries", None) or {}
+                        _name = lookup_name_for_url(dep_locked_chk.resolved_url, _regs)
+                        if _name:
+                            download_ref = _dc_replace(download_ref, registry_name=_name)
+                package_info = _registry_resolver.download_package(
+                    download_ref,
+                    install_path,
+                )
             else:
                 package_info = ctx.downloader.download_package(
                     download_ref,
@@ -494,10 +535,19 @@ class FreshDependencySource(DependencySource):
                 node.parent.dependency_ref.repo_url if node and node.parent else None
             )
             _is_dev = node.is_dev if node else False
+            # Registry-sourced deps: pull the captured resolution out of
+            # the resolver's per-graph map so the lockfile records
+            # resolved_url + resolved_hash + version (design §6.1).
+            _registry_resolution = None
+            if dep_ref.source == "registry":
+                _resolver = getattr(ctx, "registry_resolver", None)
+                if _resolver is not None:
+                    _registry_resolution = _resolver.last_resolutions.get(dep_key)
             ctx.installed_packages.append(InstalledPackage(
                 dep_ref=dep_ref, resolved_commit=resolved_commit,
                 depth=depth, resolved_by=resolved_by, is_dev=_is_dev,
                 registry_config=ctx.registry_config if not dep_ref.is_local else None,
+                registry_resolution=_registry_resolution,
             ))
             if install_path.is_dir():
                 ctx.package_hashes[dep_key] = _compute_hash(install_path)
