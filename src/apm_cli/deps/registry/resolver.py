@@ -23,9 +23,9 @@ from ...models.dependency.reference import DependencyReference
 from ...models.dependency.types import GitReferenceType, ResolvedReference
 from .auth import (
     RegistryAuthContext,
+    make_auth_context,
     remediation_message,
     resolve_for_url,
-    resolve_registry_token,
 )
 from .client import RegistryClient, RegistryError, VersionEntry
 from .extractor import extract_archive
@@ -116,8 +116,7 @@ class RegistryPackageResolver:
         return url
 
     def _build_client(self, registry_name: str, base_url: str) -> RegistryClient:
-        token = resolve_registry_token(registry_name)
-        auth = RegistryAuthContext(registry_name=registry_name, token=token)
+        auth = make_auth_context(registry_name)
         return self._client_factory(base_url, auth)
 
     def _build_client_for_url(self, base_url: str) -> RegistryClient:

@@ -74,6 +74,11 @@ class VersionEntry:
             raise RegistryError(
                 f"malformed version entry (missing 'digest') for {version!r}"
             )
+        # ``published_at`` is the spec-canonical key (snake_case throughout
+        # — see registry-http-api.md §3.1). The client is intentionally
+        # strict: a server that emits ``publishedAt`` (camelCase) is non-
+        # conformant. Accepting both would mask spec drift; reject silently
+        # by reading only the canonical name.
         published = payload.get("published_at")
         return cls(
             version=version,

@@ -61,6 +61,12 @@ Version strings follow [semver 2.0](https://semver.org/) with the following cons
 - Build metadata (`+sha.abc`) is **stripped on publish** — the canonical version is the part before `+`.
 - Versions are **case-sensitive** strings; `v1.0.0` and `1.0.0` are distinct identifiers.
 
+### 1.3.1 Field naming convention
+
+All JSON field names use **`snake_case`** (matches npm, Cargo, PyPI conventions). Servers MUST NOT emit camelCase variants alongside or instead of the canonical names.
+
+The reference client is intentionally **strict** — it reads only the spec-canonical field name and ignores camelCase variants without raising. This is by design: silent client tolerance hides server spec drift. A server emitting `publishedAt` instead of `published_at` is non-conformant and clients SHOULD treat its absence as if the field were not provided.
+
 ### 1.4 Content types
 
 | Resource | Type |
@@ -96,6 +102,14 @@ When the header is absent, the server MAY:
 
 Clients try anonymous first when no env var is configured for a URL (per design §6.2). Servers SHOULD return `401` rather than `403` for missing-credential cases so clients can distinguish "auth required" from "auth provided but not authorized."
 
+### 2.1.1 HTTP Basic auth (alternative)
+
+Servers MAY accept `Authorization: Basic <base64(username:password)>` as a v1 alternative to Bearer. This is a first-class option for compatibility with enterprise registries (JFrog Artifactory, Sonatype Nexus) that already support Basic and where Bearer-token issuance from end-user credentials is a separate, registry-specific flow.
+
+Servers MUST treat both forms as semantically identical for scope evaluation: a Basic-authed `admin:password` request and a Bearer-authed equivalent token MUST produce the same scope grants.
+
+Clients that support Basic auth read credentials from `APM_REGISTRY_USER_{NAME}` + `APM_REGISTRY_PASS_{NAME}` environment variables (see §2.3). When both Bearer and Basic env vars are set for the same registry, clients send Bearer.
+
 ### 2.2 Scopes (server-side enforcement)
 
 Tokens MUST carry one or more of these scopes. Clients never see scope strings — the server enforces them on each request.
@@ -109,9 +123,18 @@ Tokens MUST carry one or more of these scopes. Clients never see scope strings �
 
 Servers MUST reject mismatched-scope requests with `403 Forbidden` and an RFC 7807 body citing which scope is missing.
 
-### 2.3 Anti-collision with existing env vars (client-side)
+### 2.3 Client env-var conventions
 
-Clients use `APM_REGISTRY_TOKEN_{NAME}` where `{NAME}` is the uppercased registry name (`-` and `.` mapped to `_`). The prefix is distinct from `GITHUB_TOKEN`, `GITHUB_APM_PAT`, `PROXY_REGISTRY_*`, and `ARTIFACTORY_APM_TOKEN`. Servers don't see this — included here for protocol completeness.
+Clients use the following environment variables, where `{NAME}` is the uppercased registry name with `-` and `.` mapped to `_`:
+
+| Env var | Auth method |
+|---|---|
+| `APM_REGISTRY_TOKEN_{NAME}` | `Authorization: Bearer <value>` |
+| `APM_REGISTRY_USER_{NAME}` + `APM_REGISTRY_PASS_{NAME}` | `Authorization: Basic <base64(user:pass)>` |
+
+When both are set, Bearer wins. When neither is set, the client tries the request anonymously and falls back to a clear remediation message on 401/403.
+
+The prefix is distinct from `GITHUB_TOKEN`, `GITHUB_APM_PAT`, `PROXY_REGISTRY_*`, and `ARTIFACTORY_APM_TOKEN`. Servers don't see these — included here for protocol completeness.
 
 ---
 

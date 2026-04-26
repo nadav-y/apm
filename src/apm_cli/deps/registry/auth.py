@@ -1,19 +1,27 @@
-"""Registry token resolution.
+"""Registry credential resolution.
 
-Per docs/proposals/registry-api.md §7.1: a single env-var convention,
-``APM_REGISTRY_TOKEN_{NAME}`` where ``{NAME}`` is the uppercased registry name
-with hyphens replaced by underscores. No precedence chain (registries are
-always declared by name in apm.yml — there's nothing to discover).
+Per docs/proposals/registry-api.md §7.1, the primary convention is
+``APM_REGISTRY_TOKEN_{NAME}`` (HTTP Bearer). A second convention covers
+HTTP Basic auth — required by enterprise registries like JFrog Artifactory
+that don't expose Bearer-token issuance via Basic-auth themselves:
+
+    APM_REGISTRY_TOKEN_{NAME}  -> Authorization: Bearer <token>
+    APM_REGISTRY_USER_{NAME}   ┐
+    APM_REGISTRY_PASS_{NAME}   ┴ -> Authorization: Basic <base64(user:pass)>
+
+If both are set, ``TOKEN_*`` wins. ``{NAME}`` is the uppercased registry
+name with ``-`` and ``.`` mapped to ``_``.
 
 URL-based lookup (§6.2) is also implemented here: a user who clones a project
 whose lockfile references a registry URL they've never configured needs to
 install. The chain is::
 
-    resolved_url  ─→  registry name (apm.yml registries: block)  ─→  env-var token
+    resolved_url ─→ registry name (apm.yml registries: block) ─→ env-var creds
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import urllib.parse
 from dataclasses import dataclass
@@ -24,34 +32,94 @@ from typing import Dict, Optional
 class RegistryAuthContext:
     """Auth payload for a single registry HTTP call.
 
-    Empty ``token`` is legitimate — anonymous fetch is the first attempt when
-    no env var is set (§6.2 rule 2). The client tries the request anonymously
-    and only surfaces the remediation message if the server replies 401/403.
+    All-empty fields mean "anonymous" — the first attempt when no env vars
+    are set (§6.2 rule 2). The client tries anonymously and only surfaces
+    the remediation message on 401/403.
+
+    Bearer beats Basic: when both ``token`` and ``username``/``password``
+    are populated, the ``Authorization`` header is the Bearer form.
     """
 
     registry_name: Optional[str]
     token: Optional[str]
+    # HTTP Basic auth (alternative to Bearer; required for some enterprise
+    # registries — JFrog Artifactory's /access endpoints, for example).
+    username: Optional[str] = None
+    password: Optional[str] = None
 
     def auth_header(self) -> Optional[str]:
         """Return the ``Authorization`` header value, or ``None`` when anonymous."""
-        if not self.token:
-            return None
-        return f"Bearer {self.token}"
+        if self.token:
+            return f"Bearer {self.token}"
+        if self.username is not None and self.password is not None:
+            credentials = f"{self.username}:{self.password}".encode("utf-8")
+            return f"Basic {base64.b64encode(credentials).decode('ascii')}"
+        return None
+
+
+def _sanitized(registry_name: str) -> str:
+    return registry_name.upper().replace("-", "_").replace(".", "_")
 
 
 def _env_key(registry_name: str) -> str:
-    """Translate a registry name into the env-var key per §7.1.
+    """Bearer-token env-var key per §7.1.
 
     ``corp-main``  -> ``APM_REGISTRY_TOKEN_CORP_MAIN``
     ``corp.main``  -> ``APM_REGISTRY_TOKEN_CORP_MAIN``
     """
-    sanitized = registry_name.upper().replace("-", "_").replace(".", "_")
-    return f"APM_REGISTRY_TOKEN_{sanitized}"
+    return f"APM_REGISTRY_TOKEN_{_sanitized(registry_name)}"
+
+
+def _env_key_user(registry_name: str) -> str:
+    """HTTP Basic auth username env-var key.
+
+    ``corp-main`` -> ``APM_REGISTRY_USER_CORP_MAIN``
+    """
+    return f"APM_REGISTRY_USER_{_sanitized(registry_name)}"
+
+
+def _env_key_pass(registry_name: str) -> str:
+    """HTTP Basic auth password env-var key.
+
+    ``corp-main`` -> ``APM_REGISTRY_PASS_CORP_MAIN``
+    """
+    return f"APM_REGISTRY_PASS_{_sanitized(registry_name)}"
 
 
 def resolve_registry_token(registry_name: str) -> Optional[str]:
-    """Look up the env-var token for *registry_name*. ``None`` means anonymous."""
+    """Look up the env-var Bearer token for *registry_name*. ``None`` means absent."""
     return os.environ.get(_env_key(registry_name))
+
+
+def resolve_registry_basic(
+    registry_name: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Look up the (username, password) pair for HTTP Basic auth.
+
+    Returns ``(None, None)`` when either is missing — the caller treats this
+    as "no Basic auth available" and falls back to whatever else applies.
+    """
+    user = os.environ.get(_env_key_user(registry_name))
+    pwd = os.environ.get(_env_key_pass(registry_name))
+    if user is None or pwd is None:
+        return None, None
+    return user, pwd
+
+
+def make_auth_context(registry_name: str) -> RegistryAuthContext:
+    """Build a ``RegistryAuthContext`` from env vars for *registry_name*.
+
+    Reads both Bearer and Basic env vars; both can populate the context but
+    Bearer wins at the header-rendering level (see ``auth_header``).
+    """
+    token = resolve_registry_token(registry_name)
+    user, pwd = resolve_registry_basic(registry_name)
+    return RegistryAuthContext(
+        registry_name=registry_name,
+        token=token,
+        username=user,
+        password=pwd,
+    )
 
 
 def _normalize_url_prefix(url: str) -> str:
@@ -103,17 +171,15 @@ def resolve_for_url(
 ) -> RegistryAuthContext:
     """End-to-end auth resolution for a lockfile-recorded URL.
 
-    Looks up which registered name owns *target_url* and reads the env-var
-    token for that name. If no registered URL matches, returns an anonymous
-    context — the caller will try anonymous fetch and surface the §6.2
-    remediation message on 401/403.
+    Looks up which registered name owns *target_url* and reads its env-var
+    credentials (Bearer + Basic) for that name. If no registered URL
+    matches, returns an anonymous context — the caller will try anonymous
+    fetch and surface the §6.2 remediation message on 401/403.
     """
     name = lookup_name_for_url(target_url, registries)
     if name is None:
         return RegistryAuthContext(registry_name=None, token=None)
-    return RegistryAuthContext(
-        registry_name=name, token=resolve_registry_token(name)
-    )
+    return make_auth_context(name)
 
 
 def remediation_message(target_url: str) -> str:

@@ -55,6 +55,96 @@ class TestRegistryAuthContext:
         ctx = RegistryAuthContext(registry_name="corp", token="abc")
         assert ctx.auth_header() == "Bearer abc"
 
+    def test_basic_auth_when_user_password_set(self):
+        ctx = RegistryAuthContext(
+            registry_name="corp",
+            token=None,
+            username="admin",
+            password="hunter2",
+        )
+        # Authorization: Basic base64("admin:hunter2") == "YWRtaW46aHVudGVyMg=="
+        assert ctx.auth_header() == "Basic YWRtaW46aHVudGVyMg=="
+
+    def test_bearer_wins_over_basic(self):
+        # When both are populated, Bearer is authoritative.
+        ctx = RegistryAuthContext(
+            registry_name="corp",
+            token="bearer-tok",
+            username="u",
+            password="p",
+        )
+        assert ctx.auth_header() == "Bearer bearer-tok"
+
+    def test_partial_basic_returns_anonymous(self):
+        # Only username set — no Basic header (need both).
+        ctx = RegistryAuthContext(
+            registry_name="corp",
+            token=None,
+            username="admin",
+            password=None,
+        )
+        assert ctx.auth_header() is None
+
+
+class TestBasicAuthEnvVars:
+    def test_user_pass_env_keys(self, monkeypatch):
+        from apm_cli.deps.registry.auth import _env_key_user, _env_key_pass
+
+        assert _env_key_user("corp-main") == "APM_REGISTRY_USER_CORP_MAIN"
+        assert _env_key_pass("corp-main") == "APM_REGISTRY_PASS_CORP_MAIN"
+        assert _env_key_user("corp.main") == "APM_REGISTRY_USER_CORP_MAIN"
+
+    def test_resolve_registry_basic(self, monkeypatch):
+        from apm_cli.deps.registry.auth import resolve_registry_basic
+
+        monkeypatch.setenv("APM_REGISTRY_USER_CORP", "admin")
+        monkeypatch.setenv("APM_REGISTRY_PASS_CORP", "hunter2")
+        assert resolve_registry_basic("corp") == ("admin", "hunter2")
+
+    def test_resolve_registry_basic_partial_returns_none(self, monkeypatch):
+        from apm_cli.deps.registry.auth import resolve_registry_basic
+
+        monkeypatch.setenv("APM_REGISTRY_USER_CORP", "admin")
+        monkeypatch.delenv("APM_REGISTRY_PASS_CORP", raising=False)
+        # Either missing -> (None, None)
+        assert resolve_registry_basic("corp") == (None, None)
+
+
+class TestMakeAuthContext:
+    def test_bearer_only(self, monkeypatch):
+        from apm_cli.deps.registry.auth import make_auth_context
+
+        monkeypatch.setenv("APM_REGISTRY_TOKEN_CORP", "bearer-tok")
+        monkeypatch.delenv("APM_REGISTRY_USER_CORP", raising=False)
+        monkeypatch.delenv("APM_REGISTRY_PASS_CORP", raising=False)
+        ctx = make_auth_context("corp")
+        assert ctx.token == "bearer-tok"
+        assert ctx.username is None
+        assert ctx.password is None
+        assert ctx.auth_header().startswith("Bearer ")
+
+    def test_basic_only(self, monkeypatch):
+        from apm_cli.deps.registry.auth import make_auth_context
+
+        monkeypatch.delenv("APM_REGISTRY_TOKEN_CORP", raising=False)
+        monkeypatch.setenv("APM_REGISTRY_USER_CORP", "admin")
+        monkeypatch.setenv("APM_REGISTRY_PASS_CORP", "hunter2")
+        ctx = make_auth_context("corp")
+        assert ctx.token is None
+        assert ctx.username == "admin"
+        assert ctx.password == "hunter2"
+        assert ctx.auth_header().startswith("Basic ")
+
+    def test_both_bearer_wins(self, monkeypatch):
+        from apm_cli.deps.registry.auth import make_auth_context
+
+        monkeypatch.setenv("APM_REGISTRY_TOKEN_CORP", "tok")
+        monkeypatch.setenv("APM_REGISTRY_USER_CORP", "admin")
+        monkeypatch.setenv("APM_REGISTRY_PASS_CORP", "hunter2")
+        ctx = make_auth_context("corp")
+        # Both populated; auth_header renders Bearer.
+        assert ctx.auth_header() == "Bearer tok"
+
 
 class TestUrlNormalize:
     @pytest.mark.parametrize(

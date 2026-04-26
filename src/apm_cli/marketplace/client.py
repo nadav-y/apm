@@ -395,7 +395,7 @@ def search_all_registries(
     registry is skipped — one bad registry must not block search across
     the others. Same semantics as ``search_all_marketplaces``.
     """
-    from apm_cli.deps.registry.auth import RegistryAuthContext, resolve_registry_token
+    from apm_cli.deps.registry.auth import make_auth_context
     from apm_cli.deps.registry.client import RegistryClient, RegistryError
 
     results: List[MarketplacePlugin] = []
@@ -403,9 +403,7 @@ def search_all_registries(
         if not base_url:
             continue
         try:
-            auth = RegistryAuthContext(
-                registry_name=name, token=resolve_registry_token(name)
-            )
+            auth = make_auth_context(name)
             client = RegistryClient(base_url, auth)
             for hit in client.search(query, limit=limit, type=type, tag=tag):
                 results.append(

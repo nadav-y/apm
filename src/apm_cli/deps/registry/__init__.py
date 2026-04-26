@@ -9,7 +9,12 @@ This package is intentionally separate from ``src/apm_cli/registry/`` (the MCP
 registry client) — the two address different concepts and must not be confused.
 """
 
-from .auth import RegistryAuthContext, resolve_registry_token
+from .auth import (
+    RegistryAuthContext,
+    make_auth_context,
+    resolve_registry_basic,
+    resolve_registry_token,
+)
 from .client import RegistryClient, RegistryError, VersionEntry
 from .extractor import (
     extract_archive,
@@ -30,7 +35,9 @@ __all__ = [
     "extract_tarball",
     "extract_zip",
     "is_semver_range",
+    "make_auth_context",
     "match_version",
+    "resolve_registry_basic",
     "resolve_registry_token",
     "verify_sha256",
 ]

@@ -152,6 +152,34 @@ class TestListVersions:
             VersionEntry("1.1.0", "sha256:def", None),
         ]
 
+    def test_camel_case_published_at_is_ignored(self):
+        # The spec is strict (snake_case throughout). A server emitting
+        # ``publishedAt`` is non-conformant; the client MUST NOT silently
+        # accept it — that would mask spec drift. published_at is None
+        # here (the field is optional), but no error is raised because
+        # the rest of the entry is well-formed.
+        session = _make_session(
+            _make_response(
+                json_body={
+                    "package": "acme/foo",
+                    "versions": [
+                        {
+                            "version": "1.0.0",
+                            "digest": "sha256:abc",
+                            "publishedAt": "2026-04-26T14:00:00Z",
+                        }
+                    ],
+                }
+            )
+        )
+        client = RegistryClient(
+            "https://r.example.com",
+            RegistryAuthContext(registry_name="x", token=None),
+            session=session,
+        )
+        result = client.list_versions("acme", "foo")
+        assert result[0].published_at is None
+
     def test_missing_versions_array_raises(self):
         session = _make_session(_make_response(json_body={"package": "x"}))
         client = RegistryClient(
