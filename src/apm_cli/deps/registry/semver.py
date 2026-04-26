@@ -82,29 +82,27 @@ def _expand_component(comp: str) -> Optional[List[_Bound]]:
     if comp == "*":
         return [_Bound(">=", 0, 0, 0)]
 
-    # X-range: 1.x, 1.2.x, 1.*, 1.2.*
+    # X-range: 1.x, 1.2.x, 1.*, 1.2.* — any segment of x or * means "any".
+    # We only enter this branch when at least one segment is wildcard; bare
+    # ``1.2.3`` falls through to the exact-version path below.
     x_match = re.match(r"^v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?$", comp)
     if x_match:
         major_s, minor_s, patch_s = x_match.group(1), x_match.group(2), x_match.group(3)
-        if minor_s in ("x", "*", None) and patch_s in ("x", "*", None) and (
-            minor_s in ("x", "*") or patch_s in ("x", "*") or minor_s is None
-        ):
-            # Skip if it's actually a fully concrete version like ``1.2.3``
-            if minor_s not in (None, "x", "*") and patch_s not in (None, "x", "*"):
-                pass  # fall through to exact below
-            else:
-                major = int(major_s)
-                if minor_s in (None, "x", "*"):
-                    return [
-                        _Bound(">=", major, 0, 0),
-                        _Bound("<", major + 1, 0, 0),
-                    ]
-                # minor concrete, patch wildcard
-                minor = int(minor_s)
+        has_wildcard = (minor_s in ("x", "*")) or (patch_s in ("x", "*"))
+        if has_wildcard:
+            major = int(major_s)
+            # minor is wildcard (or absent) -> [major.0.0, (major+1).0.0)
+            if minor_s in (None, "x", "*"):
                 return [
-                    _Bound(">=", major, minor, 0),
-                    _Bound("<", major, minor + 1, 0),
+                    _Bound(">=", major, 0, 0),
+                    _Bound("<", major + 1, 0, 0),
                 ]
+            # minor concrete, patch wildcard -> [major.minor.0, major.(minor+1).0)
+            minor = int(minor_s)
+            return [
+                _Bound(">=", major, minor, 0),
+                _Bound("<", major, minor + 1, 0),
+            ]
 
     # Operator-prefixed: ^1.2, ~1.2.3, >=1, <2, =1.0.0
     for op in _RANGE_OPS:

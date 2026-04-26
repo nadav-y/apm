@@ -159,9 +159,11 @@ class RegistryClient:
     ) -> requests.Response:
         url = self._url(path)
         try:
+            # Pass ``url`` as a keyword so test doubles can inspect it without
+            # depending on positional-argument ordering.
             response = self._session.request(
                 method,
-                url,
+                url=url,
                 headers=self._headers(accept=accept),
                 timeout=self._timeout,
                 stream=stream,
