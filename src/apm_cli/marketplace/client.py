@@ -367,6 +367,64 @@ def search_all_marketplaces(
     return results
 
 
+def search_all_registries(
+    query: str,
+    registries: Dict[str, str],
+    *,
+    limit: int = 50,
+    type: Optional[str] = None,
+    tag: Optional[str] = None,
+) -> List[MarketplacePlugin]:
+    """Server-side search across configured dedicated APM registries.
+
+    Per docs/proposals/registry-api.md §5.4 + §9: registry-hosted catalogs
+    expose a ``GET /v1/search`` endpoint that runs server-side (permission-
+    scoped, real-time, no full-catalog download). This helper queries each
+    configured registry and adapts the results into ``MarketplacePlugin``
+    so callers can merge them with marketplace results.
+
+    Args:
+        query: Free-text search string.
+        registries: Mapping of registry name -> base URL (typically
+            ``ctx.apm_package.registries`` or the merged user/project map).
+        limit: Per-registry result cap.
+        type: Optional primitive-type filter (``skill``, ``prompt``, ...).
+        tag: Optional tag filter.
+
+    Failures (auth, network, malformed response) are logged and the
+    registry is skipped — one bad registry must not block search across
+    the others. Same semantics as ``search_all_marketplaces``.
+    """
+    from apm_cli.deps.registry.auth import RegistryAuthContext, resolve_registry_token
+    from apm_cli.deps.registry.client import RegistryClient, RegistryError
+
+    results: List[MarketplacePlugin] = []
+    for name, base_url in (registries or {}).items():
+        if not base_url:
+            continue
+        try:
+            auth = RegistryAuthContext(
+                registry_name=name, token=resolve_registry_token(name)
+            )
+            client = RegistryClient(base_url, auth)
+            for hit in client.search(query, limit=limit, type=type, tag=tag):
+                results.append(
+                    MarketplacePlugin(
+                        name=hit.id,
+                        description=hit.description or "",
+                        version=hit.latest_version or "",
+                        tags=tuple(hit.tags or ()),
+                        source_marketplace=name,
+                        registry=name,
+                    )
+                )
+        except RegistryError as exc:
+            logger.warning("Skipping registry '%s': %s", name, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Skipping registry '%s' due to unexpected error: %s", name, exc)
+    return results
+
+
 def clear_marketplace_cache(
     name: Optional[str] = None,
     host: str = "github.com",
