@@ -433,7 +433,11 @@ safe-output tools. Required label-set hygiene per issue:
 - **`assign-milestone`**: Apply the panel's recommended milestone
   IF AND ONLY IF the issue has no milestone today. Never overwrite an
   existing milestone -- that is a maintainer call. Use
-  `milestone_title` (e.g. "0.9.4"), not `milestone_number`.
+  `milestone_title` (e.g. "0.9.4"), not `milestone_number`. **If your
+  verdict comment names a milestone (e.g. "Milestone: 0.9.4"), you
+  MUST emit a corresponding `assign_milestone` call -- the verdict
+  text and the applied state must agree.** Only skip emission if you
+  explicitly omitted milestone from the verdict.
 
 If the panel decides on a label that does not exist in APM's
 taxonomy (the `add-labels` allow-list, which is enumerated literally
