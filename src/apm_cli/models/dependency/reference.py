@@ -64,6 +64,17 @@ class DependencyReference:
     is_insecure: bool = False  # True when the dependency URL uses http://
     allow_insecure: bool = False  # True if this HTTP dep is explicitly allowed
 
+    # Registry resolver fields (optional; default to None/git semantics)
+    # source: which resolver should fetch this dep. None and "git" are equivalent
+    # (legacy default). Set to "registry" by the parser when an entry routes to
+    # a configured registry (via top-level registries: block, @<name> scope, or
+    # object-form `- registry:` discriminator).
+    # registry_name: name of the registry from apm.yml's registries: block when
+    # source == "registry". Carried in-memory only; never serialized into the
+    # lockfile (the lockfile uses URL-based identity per design §6.1).
+    source: Optional[str] = None
+    registry_name: Optional[str] = None
+
     # Supported file extensions for virtual packages
     VIRTUAL_FILE_EXTENSIONS = (
         ".prompt.md",
