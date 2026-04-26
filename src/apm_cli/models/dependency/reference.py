@@ -167,6 +167,44 @@ class DependencyReference:
                     break
             return f"{repo_name}-{filename}"
 
+    # Registry-scope shorthand: ``owner/repo@<name>#<semver>`` — see
+    # docs/proposals/registry-api.md §3.2. The string MUST have at least one
+    # ``/`` on the left of ``@`` (so it can't collide with the marketplace
+    # ``code-review@plugins`` shape, which has no ``/``), and ``<name>`` must
+    # not contain ``/``. We anchor with ``^`` / ``$`` and capture greedily on
+    # the LHS so that paths like ``group/subgroup/repo@reg`` work too.
+    _REGISTRY_SCOPE_RE = re.compile(
+        r"^([a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)+)@([a-zA-Z0-9._-]+)(?:#(.+))?$"
+    )
+
+    @classmethod
+    def _extract_registry_scope(cls, dependency_str: str):
+        """Detect the ``owner/repo@<name>#<semver>`` shorthand.
+
+        Returns a ``(repo_part_with_ref, registry_name, ref)`` triple if the
+        string matches the registry-scope shape, or ``None`` if it doesn't
+        (i.e. the caller should fall through to the existing parse path).
+
+        The detector is conservative: it bails out on anything that looks
+        like an SSH or HTTP(S) URL so that ``git@host:owner/repo`` and
+        ``https://user:pwd@host/...`` keep their existing semantics.
+        """
+        s = dependency_str.strip()
+        if not s:
+            return None
+        # Skip URL forms that legitimately contain ``@``.
+        lower = s.lower()
+        if (
+            lower.startswith(("git@", "ssh://", "https://", "http://"))
+            or "://" in lower
+        ):
+            return None
+        match = cls._REGISTRY_SCOPE_RE.match(s)
+        if not match:
+            return None
+        repo_path, registry_name, ref = match.group(1), match.group(2), match.group(3)
+        return repo_path, registry_name, ref
+
     @staticmethod
     def is_local_path(dep_str: str) -> bool:
         """Check if a dependency string looks like a local filesystem path.
@@ -986,6 +1024,38 @@ class DependencyReference:
                     "//...", context="Protocol-relative URLs are not supported"
                 )
             )
+
+        # --- Registry-scope shorthand: owner/repo@<name>#<semver> ---
+        # Detected before any URL/host parsing so that the rest of the parse
+        # path sees a normal ``owner/repo#<ref>`` string. The semver
+        # constraint is enforced here (parse-time, not at install-time) per
+        # design §3.3.
+        registry_scope = cls._extract_registry_scope(dependency_str)
+        if registry_scope is not None:
+            repo_path, registry_name, ref = registry_scope
+            if not ref:
+                raise ValueError(
+                    f"registry-scoped dependency '{dependency_str}' is missing a "
+                    f"version: shorthand routed to a registry must include "
+                    f"#<semver>, e.g. 'acme/foo@{registry_name}#^1.2'."
+                )
+            # Local import to avoid a top-level cycle (registry package depends
+            # on this module via DependencyReference type hints).
+            from ...deps.registry.semver import is_semver_range
+            if not is_semver_range(ref):
+                raise ValueError(
+                    f"'{dependency_str}' routes through registry "
+                    f"'{registry_name}' but '{ref}' is not a semver version or "
+                    f"range. Use an explicit '- git:' entry for branch or "
+                    f"commit-SHA pinning, or change the ref to a semver "
+                    f"version/range (e.g. ^1.0, ~1.2.3, 1.x)."
+                )
+            # Re-parse without the @<name> portion, then attach registry fields.
+            stripped = f"{repo_path}#{ref}"
+            dep = cls.parse(stripped)
+            dep.source = "registry"
+            dep.registry_name = registry_name
+            return dep
 
         # Phase 1: detect virtual packages
         is_virtual_package, virtual_path, validated_host = cls._detect_virtual_package(
