@@ -512,7 +512,11 @@ class FreshDependencySource(DependencySource):
                     _ref = resolved.ref_name if resolved.ref_name else ""
                     _sha = resolved.resolved_commit[:8] if resolved.resolved_commit else ""
                 logger.download_complete(display_name, ref=_ref, sha=_sha)
-                if ctx.auth_resolver:
+                # Only emit the per-package git auth diagnostic for git deps.
+                # Registry-sourced deps don't talk to git hosts; resolving
+                # github.com auth here for them is misleading (and can issue
+                # network calls via auth.AuthResolver providers).
+                if ctx.auth_resolver and dep_ref.source in (None, "git"):
                     try:
                         _host = dep_ref.host or "github.com"
                         _org = (
