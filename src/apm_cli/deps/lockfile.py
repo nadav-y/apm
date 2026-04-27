@@ -297,8 +297,15 @@ class LockFile:
     local_deployed_file_hashes: Dict[str, str] = field(default_factory=dict)
 
     def add_dependency(self, dep: LockedDependency) -> None:
-        """Add a dependency to the lock file."""
+        """Add a dependency to the lock file.
+
+        Adding a registry-sourced dep promotes ``lockfile_version`` to
+        ``"2"`` immediately, keeping the in-memory state consistent with
+        what ``to_yaml()`` would emit (design §6.1).
+        """
         self.dependencies[dep.get_unique_key()] = dep
+        if dep.source == "registry" and self.lockfile_version == "1":
+            self.lockfile_version = "2"
 
     def get_dependency(self, key: str) -> Optional[LockedDependency]:
         """Get a dependency by its unique key."""
@@ -330,10 +337,14 @@ class LockFile:
 
     def to_yaml(self) -> str:
         """Serialize to YAML string."""
-        # Opportunistic v1->v2 bump (design §6.1): emit "2" only when at
-        # least one dep is registry-sourced. This is the explicit invariant
-        # §2.1.4 guarantee — projects that don't use the registry keep v1.
-        emit_version = "2" if self._needs_v2() else self.lockfile_version
+        # Opportunistic v1<->v2 derivation (design §6.1, invariant §2.1.4):
+        # the lockfile_version field always reflects current content at
+        # emit time. ``add_dependency`` bumps to "2" eagerly, but callers
+        # that mutate ``self.dependencies`` directly or remove the last
+        # registry dep need the field re-derived here so the on-disk
+        # version is correct in both directions.
+        self.lockfile_version = "2" if self._needs_v2() else "1"
+        emit_version = self.lockfile_version
         # The synthesized self-entry (key ".") is an in-memory normalization
         # of the flat local_deployed_files / local_deployed_file_hashes
         # fields. It must not be written back into the dependencies list,

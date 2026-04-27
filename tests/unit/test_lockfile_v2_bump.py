@@ -45,6 +45,44 @@ def _registry_dep(**kwargs) -> LockedDependency:
 # ───────────────────────────────────────────────────────────────────────────
 
 
+class TestVersionFieldStaysInSync:
+    """Regression: ``lockfile_version`` must reflect content in the in-memory
+    object, not just at to_yaml() emit time. Otherwise the equivalence check
+    sees ``"1"`` in-memory vs ``"2"`` on-disk and rewrites the file on every
+    no-op install.
+    """
+
+    def test_add_registry_dep_promotes_field_to_v2(self):
+        lock = LockFile()  # default "1"
+        assert lock.lockfile_version == "1"
+        lock.add_dependency(_registry_dep())
+        assert lock.lockfile_version == "2"
+
+    def test_add_git_dep_keeps_field_at_v1(self):
+        lock = LockFile()
+        lock.add_dependency(_git_dep())
+        assert lock.lockfile_version == "1"
+
+    def test_inmem_and_disk_equivalent_after_add(self):
+        in_memory = LockFile()
+        in_memory.add_dependency(_registry_dep())
+        on_disk = LockFile.from_yaml(in_memory.to_yaml())
+        assert in_memory.lockfile_version == on_disk.lockfile_version == "2"
+        assert in_memory.is_semantically_equivalent(on_disk)
+        assert on_disk.is_semantically_equivalent(in_memory)
+
+    def test_to_yaml_self_heals_direct_dict_mutation(self):
+        # Defense-in-depth: a caller that bypasses add_dependency by
+        # mutating ``self.dependencies`` directly will still get the
+        # right emit version on first to_yaml() call.
+        lock = LockFile()
+        lock.dependencies[_registry_dep().get_unique_key()] = _registry_dep()
+        assert lock.lockfile_version == "1"  # bypass — field stale
+        out = lock.to_yaml()
+        assert lock.lockfile_version == "2"  # to_yaml self-healed
+        assert "lockfile_version: '2'" in out
+
+
 class TestSchemaBumpOpportunistic:
     def test_v1_stays_v1_without_registry_deps(self):
         lock = LockFile()
