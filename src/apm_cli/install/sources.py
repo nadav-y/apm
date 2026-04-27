@@ -351,18 +351,33 @@ class CachedDependencySource(DependencySource):
         elif ctx.registry_config and not dep_ref.is_local:
             _cached_registry = ctx.registry_config
 
-        # Registry-sourced cached dep: preserve the lockfile's resolved_url
-        # + resolved_hash + version across re-installs by synthesizing a
-        # RegistryResolution from the existing locked entry. Without this,
-        # the lockfile would lose those fields on every cache-hit re-install.
+        # Registry-sourced cached dep: pull the resolution data from one of
+        # two sources so the lockfile preserves resolved_url + resolved_hash
+        # + version across the cached path:
+        #
+        # 1. The resolver's last_resolutions map — populated when the BFS
+        #    callback in resolve.py just downloaded this dep fresh during
+        #    dependency-graph resolution. That's the case on a first install
+        #    with no prior lockfile.
+        # 2. The existing lockfile entry — populated on a re-install where
+        #    the dep is already on disk and was previously verified.
+        #
+        # Without either of these, a registry-sourced dep that lands on the
+        # cached path silently degrades into a v1-shaped lockfile entry
+        # (missing source/resolved_url/resolved_hash). Source (1) is the
+        # bug fix; source (2) was the original Phase 7 wiring.
         _cached_resolution = None
-        if dep_ref.source == "registry" and dep_locked_chk and dep_locked_chk.resolved_url:
-            from apm_cli.deps.registry.resolver import RegistryResolution
-            _cached_resolution = RegistryResolution(
-                resolved_url=dep_locked_chk.resolved_url,
-                resolved_hash=dep_locked_chk.resolved_hash or "",
-                version=dep_locked_chk.version or (dep_ref.reference or ""),
-            )
+        if dep_ref.source == "registry":
+            _resolver = getattr(ctx, "registry_resolver", None)
+            if _resolver is not None:
+                _cached_resolution = _resolver.last_resolutions.get(dep_key)
+            if _cached_resolution is None and dep_locked_chk and dep_locked_chk.resolved_url:
+                from apm_cli.deps.registry.resolver import RegistryResolution
+                _cached_resolution = RegistryResolution(
+                    resolved_url=dep_locked_chk.resolved_url,
+                    resolved_hash=dep_locked_chk.resolved_hash or "",
+                    version=dep_locked_chk.version or (dep_ref.reference or ""),
+                )
 
         ctx.installed_packages.append(InstalledPackage(
             dep_ref=dep_ref, resolved_commit=cached_commit,
