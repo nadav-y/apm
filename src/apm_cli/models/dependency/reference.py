@@ -628,6 +628,13 @@ class DependencyReference:
         ``- git:`` object form exists for the cases string shorthand can't
         handle.
         """
+        from apm_cli.core.experimental import is_enabled
+        if not is_enabled("registry"):
+            raise ValueError(
+                "Object-form '- registry:' dependency requires the registry "
+                "experimental feature.\n"
+                "Enable it with: apm experimental enable registry"
+            )
         registry_name = entry.get("registry")
         if not isinstance(registry_name, str) or not registry_name.strip():
             raise ValueError(
@@ -1158,6 +1165,13 @@ class DependencyReference:
         # design §3.3.
         registry_scope = cls._extract_registry_scope(dependency_str)
         if registry_scope is not None:
+            from apm_cli.core.experimental import is_enabled
+            if not is_enabled("registry"):
+                raise ValueError(
+                    f"Registry-scoped dependency '{dependency_str}' requires the "
+                    f"registry experimental feature.\n"
+                    f"Enable it with: apm experimental enable registry"
+                )
             repo_path, registry_name, ref = registry_scope
             if not ref:
                 raise ValueError(

@@ -17,6 +17,18 @@ import pytest
 from apm_cli.models.apm_package import APMPackage, clear_apm_yml_cache
 
 
+@pytest.fixture(autouse=True)
+def _enable_registry_flag(monkeypatch):
+    """Enable the 'registry' experimental flag for every test in this module."""
+    import apm_cli.config as _conf
+    from apm_cli.config import _invalidate_config_cache
+
+    _invalidate_config_cache()
+    monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": True}})
+    yield
+    _invalidate_config_cache()
+
+
 @pytest.fixture
 def write_yml(tmp_path):
     """Yield a helper that writes ``apm.yml`` content to a temp dir."""
@@ -420,3 +432,73 @@ class TestBackwardsCompatibility:
         )
         pkg = APMPackage.from_apm_yml(p)
         assert pkg.dependencies["apm"][0].reference is None
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Experimental flag gate
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestRegistriesBlockFlagGate:
+    """The 'registry' experimental flag gates the registries: block."""
+
+    def test_registries_block_raises_when_flag_disabled(
+        self, write_yml, monkeypatch
+    ):
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+
+        p = write_yml(
+            """
+            name: x
+            version: 1.0.0
+            registries:
+              corp:
+                url: https://corp.example.com/apm
+            """
+        )
+        with pytest.raises(ValueError, match="experimental"):
+            APMPackage.from_apm_yml(p)
+
+        _invalidate_config_cache()
+
+    def test_registries_block_allowed_when_flag_enabled(self, write_yml):
+        # _enable_registry_flag autouse fixture already enables the flag.
+        p = write_yml(
+            """
+            name: x
+            version: 1.0.0
+            registries:
+              corp:
+                url: https://corp.example.com/apm
+            """
+        )
+        pkg = APMPackage.from_apm_yml(p)
+        assert pkg.registries == {"corp": "https://corp.example.com/apm"}
+
+    def test_no_registries_block_unaffected_by_flag_state(
+        self, write_yml, monkeypatch
+    ):
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+
+        p = write_yml(
+            """
+            name: x
+            version: 1.0.0
+            dependencies:
+              apm:
+                - acme/foo#main
+            """
+        )
+        # Must not raise — §2.1.1 zero-config-parity invariant.
+        pkg = APMPackage.from_apm_yml(p)
+        assert pkg.registries is None
+
+        _invalidate_config_cache()

@@ -20,6 +20,18 @@ import pytest
 from apm_cli.models.dependency.reference import DependencyReference
 
 
+@pytest.fixture(autouse=True)
+def _enable_registry_flag(monkeypatch):
+    """Enable the 'registry' experimental flag for every test in this module."""
+    import apm_cli.config as _conf
+    from apm_cli.config import _invalidate_config_cache
+
+    _invalidate_config_cache()
+    monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": True}})
+    yield
+    _invalidate_config_cache()
+
+
 class TestRegistryScopeRouting:
     """Strings of the form ``owner/repo@<name>#<semver>`` route to a registry."""
 
@@ -324,3 +336,54 @@ class TestRegistryFieldsRoundTrip:
         d_git = DependencyReference.parse("acme/foo#1.0.0")
         d_reg = DependencyReference.parse("acme/foo@corp-main#1.0.0")
         assert d_git.get_identity() == d_reg.get_identity() == "acme/foo"
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Experimental flag gate
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestRegistryFlagGate:
+    """The 'registry' experimental flag gates registry-scope parse paths."""
+
+    def test_registry_shorthand_blocked_when_flag_disabled(self, monkeypatch):
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+
+        with pytest.raises(ValueError, match="experimental"):
+            DependencyReference.parse("acme/foo@corp#^1.0")
+
+        _invalidate_config_cache()
+
+    def test_registry_object_form_blocked_when_flag_disabled(self, monkeypatch):
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+
+        with pytest.raises(ValueError, match="experimental"):
+            DependencyReference.parse_from_dict({
+                "registry": "corp",
+                "id": "acme/foo",
+                "path": "prompts/foo.md",
+                "version": "1.0.0",
+            })
+
+        _invalidate_config_cache()
+
+    def test_non_registry_shorthand_unaffected_by_flag_state(self, monkeypatch):
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+
+        # Plain git shorthand must never trigger the registry gate.
+        d = DependencyReference.parse("acme/foo#main")
+        assert d.source is None
+
+        _invalidate_config_cache()

@@ -187,3 +187,49 @@ class TestRegistryResolutionFlowsToLockfile:
         # And the lockfile bumps to v2 on emit.
         yaml_out = lock.to_yaml()
         assert "lockfile_version: '2'" in yaml_out
+
+
+class TestRegistryFlagGate:
+    """The 'registry' experimental flag gates resolver construction."""
+
+    def _make_lock_with_registry_dep(self):
+        lock = LockFile()
+        lock.add_dependency(
+            LockedDependency(
+                repo_url="acme/x",
+                source="registry",
+                resolved_url="https://r/x",
+                resolved_hash="sha256:x",
+                version="1.0.0",
+            )
+        )
+        return lock
+
+    def test_registry_flag_disabled_returns_false(self, monkeypatch):
+        """is_enabled returns False when config sets registry: False."""
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+        from apm_cli.core.experimental import is_enabled
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": False}})
+        assert is_enabled("registry") is False
+        _invalidate_config_cache()
+
+    def test_registry_flag_enabled_returns_true(self, monkeypatch):
+        """is_enabled returns True when config sets registry: True."""
+        import apm_cli.config as _conf
+        from apm_cli.config import _invalidate_config_cache
+        from apm_cli.core.experimental import is_enabled
+
+        _invalidate_config_cache()
+        monkeypatch.setattr(_conf, "_config_cache", {"experimental": {"registry": True}})
+        assert is_enabled("registry") is True
+        _invalidate_config_cache()
+
+    def test_lockfile_has_registry_deps_still_detected_regardless_of_flag(self):
+        """_lockfile_has_registry_deps is a pure inspection helper with no flag check."""
+        from apm_cli.install.phases.resolve import _lockfile_has_registry_deps
+
+        lock = self._make_lock_with_registry_dep()
+        assert _lockfile_has_registry_deps(lock) is True

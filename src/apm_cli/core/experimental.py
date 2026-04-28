@@ -55,6 +55,12 @@ class ExperimentalFlag:
 # ---------------------------------------------------------------------------
 
 FLAGS: dict[str, ExperimentalFlag] = {
+    "registry": ExperimentalFlag(
+        name="registry",
+        description="Enable HTTP package registry support (registries: block in apm.yml).",
+        default=False,
+        hint="Add a 'registries:' block to your apm.yml and run 'apm install'.",
+    ),
     "verbose_version": ExperimentalFlag(
         name="verbose_version",
         description="Show Python version, platform, and install path in 'apm --version'.",

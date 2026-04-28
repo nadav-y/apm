@@ -82,6 +82,13 @@ def _parse_registries_block(data: dict, apm_yml_path: Path):
     raw = data.get('registries')
     if raw is None:
         return None, None
+    from apm_cli.core.experimental import is_enabled
+    if not is_enabled("registry"):
+        raise ValueError(
+            f"{apm_yml_path}: Found a 'registries:' block, but the registry "
+            f"feature is experimental and must be opted-in before use.\n"
+            f"Enable it with: apm experimental enable registry"
+        )
     if not isinstance(raw, dict):
         raise ValueError(
             f"Top-level 'registries:' block in {apm_yml_path} must be a "

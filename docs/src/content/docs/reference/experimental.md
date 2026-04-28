@@ -36,6 +36,7 @@ apm experimental list [OPTIONS]
 $ apm experimental list
                          Experimental Features
   Flag             Status     Description
+  registry         disabled   Enable HTTP package registry support (registries: block in apm.yml).
   verbose-version  disabled   Show Python version, platform, and install path in 'apm --version'.
   Tip: apm experimental enable <name>
 ```
@@ -54,6 +55,13 @@ Use `--json` for scripts and automation. It suppresses the table, colour, and in
 ```bash
 $ apm experimental list --json
 [
+  {
+    "name": "registry",
+    "enabled": false,
+    "default": false,
+    "description": "Enable HTTP package registry support (registries: block in apm.yml).",
+    "source": "default"
+  },
   {
     "name": "verbose_version",
     "enabled": false,
@@ -169,6 +177,7 @@ apm experimental reset verbose-version
 
 | Name              | Description                                                                      |
 |-------------------|----------------------------------------------------------------------------------|
+| `registry`        | Enable HTTP package registry support (`registries:` block in `apm.yml`).         |
 | `verbose-version` | Show Python version, platform, and install path in `apm --version`.              |
 
 New flags are proposed via [CONTRIBUTING.md](https://github.com/microsoft/apm/blob/main/CONTRIBUTING.md#how-to-add-an-experimental-feature-flag) and graduate to default when stable. See the contributor recipe for the full lifecycle.

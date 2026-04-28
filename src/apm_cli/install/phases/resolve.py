@@ -129,6 +129,15 @@ def run(ctx: "InstallContext") -> None:
     registries_map = getattr(ctx.apm_package, "registries", None) or {}
     needs_registry = bool(registries_map) or _lockfile_has_registry_deps(existing_lockfile)
     if needs_registry:
+        from apm_cli.core.experimental import is_enabled
+        if not is_enabled("registry"):
+            raise RuntimeError(
+                "The lockfile contains registry-sourced dependencies "
+                "('source: registry'), but the 'registry' experimental flag "
+                "is not enabled.\n"
+                "Enable it with: apm experimental enable registry\n"
+                "Or remove the registry entries from your lockfile."
+            )
         from apm_cli.deps.registry.resolver import RegistryPackageResolver
         registry_resolver = RegistryPackageResolver(registries_map)
     ctx.registry_resolver = registry_resolver
