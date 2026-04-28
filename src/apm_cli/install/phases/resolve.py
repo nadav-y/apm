@@ -25,6 +25,37 @@ if TYPE_CHECKING:
     from apm_cli.install.context import InstallContext
 
 
+def _lockfile_has_registry_deps(existing_lockfile) -> bool:
+    """True when the on-disk lockfile records at least one registry-sourced dep.
+
+    Used to construct the registry resolver even when apm.yml's
+    ``registries:`` block has been removed but locked deps still need to
+    re-install. A user clones a repo, the apm.yml has no registries: block
+    but the lockfile says some deps are ``source: registry`` — we still
+    want them to install (they'll fail at auth lookup if the URL doesn't
+    match anything configured, with a clear remediation per §6.2).
+    """
+    if not existing_lockfile:
+        return False
+    return any(
+        dep.source == "registry" for dep in existing_lockfile.dependencies.values()
+    )
+
+
+def _require_package_registry_feature_if_needed(
+    registries_map, existing_lockfile
+) -> bool:
+    """Validate the gate and return whether registry support is needed."""
+    needs_registry = bool(registries_map) or _lockfile_has_registry_deps(
+        existing_lockfile
+    )
+    if needs_registry:
+        from apm_cli.deps.registry.feature_gate import require_package_registry_enabled
+
+        require_package_registry_enabled("Registry-sourced installs")
+    return needs_registry
+
+
 def run(ctx: "InstallContext") -> None:
     """Execute the resolve phase.
 
@@ -99,12 +130,37 @@ def run(ctx: "InstallContext") -> None:
     ctx.downloader = downloader
 
     # ------------------------------------------------------------------
+    # 3b. Dedicated registry resolver (design §3.1, §8)
+    # ------------------------------------------------------------------
+    # Built when:
+    #   - the manifest's apm.yml has a top-level ``registries:`` block, OR
+    #   - the on-disk lockfile has at least one ``source: registry`` entry
+    #     (re-install of a project whose authors removed the block but the
+    #     locked deps still need somewhere to land).
+    # In the second case the URL is the trust anchor — auth resolves by
+    # URL prefix against the apm.yml registries map (which may be empty,
+    # forcing anonymous fetch).
+    registry_resolver = None
+    _apply_lockfile_registry_name = None
+    registries_map = getattr(ctx.apm_package, "registries", None) or {}
+    needs_registry = _require_package_registry_feature_if_needed(
+        registries_map, existing_lockfile
+    )
+    if needs_registry:
+        from apm_cli.deps.registry.auth import (
+            dependency_ref_with_registry_name_from_lockfile,
+        )
+        from apm_cli.deps.registry.resolver import RegistryPackageResolver
+
+        registry_resolver = RegistryPackageResolver(registries_map)
+        _apply_lockfile_registry_name = dependency_ref_with_registry_name_from_lockfile
+    ctx.registry_resolver = registry_resolver
+
+    # ------------------------------------------------------------------
     # 4. Tracking variables (phase-local except where noted)
     # ------------------------------------------------------------------
     # direct_dep_keys is phase-local (only read inside download_callback)
-    direct_dep_keys = builtins.set(
-        dep.get_unique_key() for dep in ctx.all_apm_deps
-    )
+    direct_dep_keys = builtins.set(dep.get_unique_key() for dep in ctx.all_apm_deps)
     # These three escape to later phases via ctx
     callback_downloaded: builtins.dict = {}
     transitive_failures: builtins.list = []
@@ -134,6 +190,35 @@ def run(ctx: "InstallContext") -> None:
         if install_path.exists():
             return install_path
         try:
+            # ─── Registry-sourced dep (design §8) ──────────────────────
+            # Routed before local/git so the registry resolver owns the
+            # download for source=="registry" entries. Lockfile re-installs
+            # may arrive with registry_name=None — look it up by URL prefix
+            # against the configured registries map.
+            if dep_ref.source == "registry":
+                from apm_cli.deps.registry.feature_gate import (
+                    require_package_registry_enabled,
+                )
+
+                require_package_registry_enabled("Registry-sourced downloads")
+
+                if registry_resolver is None:
+                    raise RuntimeError(
+                        f"dep {dep_ref.repo_url!r} is registry-sourced but no "
+                        f"registries: block is configured in apm.yml and the "
+                        f"lockfile carries no resolved_url for it."
+                    )
+                dep_ref = _apply_lockfile_registry_name(
+                    dep_ref,
+                    registries_map,
+                    existing_lockfile=existing_lockfile,
+                )
+                registry_resolver.download_package(dep_ref, install_path)
+                # Mark as already-downloaded so the parallel pre-download
+                # phase skips this dep. No SHA for registry deps.
+                callback_downloaded[dep_ref.get_unique_key()] = None
+                return install_path
+
             # Handle local packages: copy instead of git clone
             if dep_ref.is_local and dep_ref.local_path:
                 if scope is InstallScope.USER:
@@ -153,9 +238,7 @@ def run(ctx: "InstallContext") -> None:
             # T5: Use locked commit if available (reproducible installs)
             locked_ref = None
             if existing_lockfile:
-                locked_dep = existing_lockfile.get_dependency(
-                    dep_ref.get_unique_key()
-                )
+                locked_dep = existing_lockfile.get_dependency(dep_ref.get_unique_key())
                 if (
                     locked_dep
                     and locked_dep.resolved_commit
@@ -192,14 +275,9 @@ def run(ctx: "InstallContext") -> None:
             # Distinguish direct vs transitive failure messages so users
             # don't see a misleading "transitive dep" label for top-level deps.
             if is_direct:
-                fail_msg = (
-                    f"Failed to download dependency "
-                    f"{dep_ref.repo_url}: {e}"
-                )
+                fail_msg = f"Failed to download dependency " f"{dep_ref.repo_url}: {e}"
             else:
-                chain_hint = (
-                    f" (via {parent_chain})" if parent_chain else ""
-                )
+                chain_hint = f" (via {parent_chain})" if parent_chain else ""
                 fail_msg = (
                     f"Failed to resolve transitive dep "
                     f"{dep_ref.repo_url}{chain_hint}: {e}"
@@ -237,9 +315,7 @@ def run(ctx: "InstallContext") -> None:
             )
             for node in tree.nodes.values():
                 if node.depth > 1:
-                    ctx.logger.verbose_detail(
-                        f"    {node.get_ancestor_chain()}"
-                    )
+                    ctx.logger.verbose_detail(f"    {node.get_ancestor_chain()}")
         else:
             ctx.logger.verbose_detail(
                 f"Resolved {direct_count} direct dependencies (no transitive)"
@@ -294,9 +370,7 @@ def run(ctx: "InstallContext") -> None:
                 _collect_descendants(node)
 
         deps_to_install = [
-            dep
-            for dep in deps_to_install
-            if dep.get_identity() in only_identities
+            dep for dep in deps_to_install if dep.get_identity() in only_identities
         ]
 
     from apm_cli.install.insecure_policy import (
@@ -328,9 +402,7 @@ def run(ctx: "InstallContext") -> None:
     # ------------------------------------------------------------------
     # 8. Orphan detection: intended_dep_keys
     # ------------------------------------------------------------------
-    ctx.intended_dep_keys = builtins.set(
-        d.get_unique_key() for d in deps_to_install
-    )
+    ctx.intended_dep_keys = builtins.set(d.get_unique_key() for d in deps_to_install)
 
     # ------------------------------------------------------------------
     # Write ancillary state to ctx for later phases

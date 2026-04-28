@@ -9,6 +9,19 @@ This page documents how APM routes dependency downloads through an enterprise
 registry proxy (Artifactory or compatible), the trust contract that proves
 traffic cannot bypass the proxy, and the playbook for fully air-gapped CI.
 
+:::note[Not to be confused with **Registries**]
+The **registry proxy** documented here transparently fronts an upstream Git
+host (GitHub, GitLab) so dependency clones flow through your enterprise
+infrastructure. Configured per-machine via `PROXY_REGISTRY_*` env vars.
+
+A **dedicated registry** ([Registries guide](../../guides/registries/)) is a
+separate, additive package source that speaks the [Registry HTTP API](../../reference/registry-http-api/)
+directly — no Git host upstream. Configured per-project in `apm.yml` via the
+top-level `registries:` block, and currently requires `apm experimental enable package-registry`.
+
+Both can be used together; they're orthogonal.
+:::
+
 For the *policy-cache* offline story (a different mechanism), see
 [Governance #9](../governance-guide/#9-air-gapped-and-offline).
 

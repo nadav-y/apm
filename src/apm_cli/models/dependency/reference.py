@@ -24,6 +24,13 @@ from ..validation import InvalidVirtualPackageExtensionError
 from .types import VirtualPackageType
 
 
+def _is_valid_registry_semver_range(spec: str) -> bool:
+    """Defer importing ``deps.registry`` until call time (avoids import cycles)."""
+    from ...deps.registry.semver import is_semver_range
+
+    return is_semver_range(spec)
+
+
 @dataclass
 class DependencyReference:
     """Represents a reference to an APM dependency."""
@@ -32,7 +39,9 @@ class DependencyReference:
     host: Optional[str] = (
         None  # Optional host (github.com, dev.azure.com, or enterprise host)
     )
-    port: Optional[int] = None  # Non-standard SSH/HTTPS port (e.g. 7999 for Bitbucket DC)
+    port: Optional[int] = (
+        None  # Non-standard SSH/HTTPS port (e.g. 7999 for Bitbucket DC)
+    )
     explicit_scheme: Optional[str] = (
         None  # User-stated transport: "ssh", "https", "http", or None for shorthand
     )
@@ -66,6 +75,17 @@ class DependencyReference:
 
     # SKILL_BUNDLE subset selection (persisted in apm.yml `skills:` field)
     skill_subset: Optional[List[str]] = None  # Sorted skill names, or None = all
+
+    # Registry resolver fields (optional; default to None/git semantics)
+    # source: which resolver should fetch this dep. None and "git" are equivalent
+    # (legacy default). Set to "registry" by the parser when an entry routes to
+    # a configured registry (via top-level registries: block, @<name> scope, or
+    # object-form `- registry:` discriminator).
+    # registry_name: name of the registry from apm.yml's registries: block when
+    # source == "registry". Carried in-memory only; never serialized into the
+    # lockfile (the lockfile uses URL-based identity per design §6.1).
+    source: Optional[str] = None
+    registry_name: Optional[str] = None
 
     # Supported file extensions for virtual packages
     VIRTUAL_FILE_EXTENSIONS = (
@@ -159,10 +179,48 @@ class DependencyReference:
                     break
             return f"{repo_name}-{filename}"
 
+    # Registry-scope shorthand: ``owner/repo@<name>#<semver>`` — see
+    # docs/proposals/registry-api.md §3.2. The string MUST have at least one
+    # ``/`` on the left of ``@`` (so it can't collide with the marketplace
+    # ``code-review@plugins`` shape, which has no ``/``), and ``<name>`` must
+    # not contain ``/``. We anchor with ``^`` / ``$`` and capture greedily on
+    # the LHS so that paths like ``group/subgroup/repo@reg`` work too.
+    _REGISTRY_SCOPE_RE = re.compile(
+        r"^([a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)+)@([a-zA-Z0-9._-]+)(?:#(.+))?$"
+    )
+
+    @classmethod
+    def _extract_registry_scope(cls, dependency_str: str):
+        """Detect the ``owner/repo@<name>#<semver>`` shorthand.
+
+        Returns a ``(repo_part_with_ref, registry_name, ref)`` triple if the
+        string matches the registry-scope shape, or ``None`` if it doesn't
+        (i.e. the caller should fall through to the existing parse path).
+
+        The detector is conservative: it bails out on anything that looks
+        like an SSH or HTTP(S) URL so that ``git@host:owner/repo`` and
+        ``https://user:pwd@host/...`` keep their existing semantics.
+        """
+        s = dependency_str.strip()
+        if not s:
+            return None
+        # Skip URL forms that legitimately contain ``@``.
+        lower = s.lower()
+        if (
+            lower.startswith(("git@", "ssh://", "https://", "http://"))
+            or "://" in lower
+        ):
+            return None
+        match = cls._REGISTRY_SCOPE_RE.match(s)
+        if not match:
+            return None
+        repo_path, registry_name, ref = match.group(1), match.group(2), match.group(3)
+        return repo_path, registry_name, ref
+
     @staticmethod
     def is_local_path(dep_str: str) -> bool:
         """Check if a dependency string looks like a local filesystem path.
-        
+
         Local paths start with './', '../', '/', '~/', '~\\', or a Windows drive
         letter (e.g. 'C:\\' or 'C:/').
         Protocol-relative URLs ('//...') are explicitly excluded.
@@ -171,15 +229,15 @@ class DependencyReference:
         # Reject protocol-relative URLs ('//...')
         if s.startswith("//"):
             return False
-        if s.startswith(('./','../', '/', '~/', '~\\', '.\\', '..\\')):
+        if s.startswith(("./", "../", "/", "~/", "~\\", ".\\", "..\\")):
             return True
         # Windows absolute paths: drive letter + colon + separator (C:\ or C:/).
         # Only ASCII letters A-Z/a-z are valid drive letters.
         if (
             len(s) >= 3
-            and (('A' <= s[0] <= 'Z') or ('a' <= s[0] <= 'z'))
-            and s[1] == ':'
-            and s[2] in ('\\', '/')
+            and (("A" <= s[0] <= "Z") or ("a" <= s[0] <= "z"))
+            and s[1] == ":"
+            and s[2] in ("\\", "/")
         ):
             return True
         return False
@@ -477,6 +535,19 @@ class DependencyReference:
         Raises:
             ValueError: If the entry is missing required fields or has invalid format
         """
+        # Object-form registry virtual package — design §3.2.
+        # Discriminated by the ``registry:`` key. Mutually exclusive with
+        # ``git:``. Required fields: registry, id, path, version. ``alias`` is
+        # optional. Used only for virtual packages because non-virtual entries
+        # compose cleanly in the ``owner/repo@<name>#<semver>`` shorthand.
+        if "registry" in entry:
+            if "git" in entry:
+                raise ValueError(
+                    "Object-style dependency cannot mix 'registry:' and 'git:' "
+                    "keys — choose one resolver."
+                )
+            return cls._parse_registry_object_entry(entry)
+
         # Support dict-form local path: { path: ./local/dir }
         if "path" in entry and "git" not in entry:
             local = entry["path"]
@@ -493,7 +564,8 @@ class DependencyReference:
 
         if "git" not in entry:
             raise ValueError(
-                "Object-style dependency must have a 'git' or 'path' field"
+                "Object-style dependency must have a 'git', 'path', or "
+                "'registry' field"
             )
 
         git_url = entry["git"]
@@ -520,6 +592,10 @@ class DependencyReference:
         # Parse the git URL using the standard parser
         dep = cls.parse(git_url)
         dep.allow_insecure = allow_insecure
+        # Object-form ``- git:`` is an explicit Git resolver pin, even when
+        # a top-level ``registries.default`` is set. Mark source so the
+        # default-routing pass in apm_package.py leaves it alone.
+        dep.source = "git"
 
         # Apply overrides from the object fields
         if ref_override is not None:
@@ -546,9 +622,7 @@ class DependencyReference:
         skills_raw = entry.get("skills")
         if skills_raw is not None:
             if not isinstance(skills_raw, (list,)):
-                raise ValueError(
-                    "'skills' field must be a list of skill names"
-                )
+                raise ValueError("'skills' field must be a list of skill names")
             if len(skills_raw) == 0:
                 raise ValueError(
                     "skills: must contain at least one name; "
@@ -570,6 +644,114 @@ class DependencyReference:
             dep.skill_subset = sorted(validated)
 
         return dep
+
+    @classmethod
+    def _parse_registry_object_entry(cls, entry: dict) -> "DependencyReference":
+        """Parse the object-form registry virtual-package entry per §3.2.
+
+        Required keys:
+            registry: <name>           # routes to apm.yml registries: block
+            id:       <owner>/<repo>   # package identity at the registry
+            path:     prompts/foo.md   # virtual sub-path inside the package
+            version:  <semver>         # strict semver, parse-time enforced
+
+        Optional:
+            alias:    <name>           # same meaning as in other object forms
+
+        Why object form for virtual only: a non-virtual registry entry composes
+        cleanly in the ``owner/repo@<name>#<semver>`` shorthand. Virtual
+        packages need four independent fields (id, registry, sub-path, version)
+        that don't combine into a readable string. Symmetric with how
+        ``- git:`` object form exists for the cases string shorthand can't
+        handle.
+        """
+        from ...deps.registry.feature_gate import require_package_registry_enabled
+
+        require_package_registry_enabled("Object-form registry dependencies")
+
+        registry_name = entry.get("registry")
+        if not isinstance(registry_name, str) or not registry_name.strip():
+            raise ValueError(
+                "Object-form registry entry: 'registry' must be a non-empty "
+                "string (the name of an entry in the apm.yml registries: block)"
+            )
+        registry_name = registry_name.strip()
+
+        pkg_id = entry.get("id")
+        if not isinstance(pkg_id, str) or not pkg_id.strip():
+            raise ValueError(
+                "Object-form registry entry: 'id' is required and must be a "
+                "non-empty 'owner/repo' string"
+            )
+        pkg_id = pkg_id.strip()
+        if "/" not in pkg_id:
+            raise ValueError(
+                f"Object-form registry entry: 'id' must be 'owner/repo', "
+                f"got {pkg_id!r}"
+            )
+
+        sub_path = entry.get("path")
+        if not isinstance(sub_path, str) or not sub_path.strip():
+            raise ValueError(
+                "Object-form registry entry: 'path' is required (virtual "
+                "sub-path inside the package, e.g. 'prompts/review.prompt.md')"
+            )
+        sub_path = sub_path.strip().strip("/").replace("\\", "/").strip("/")
+        validate_path_segments(sub_path, context="path")
+
+        version = entry.get("version")
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError(
+                "Object-form registry entry: 'version' is required (semver "
+                "version or range)"
+            )
+        version = version.strip()
+        if not _is_valid_registry_semver_range(version):
+            raise ValueError(
+                f"Object-form registry entry: version {version!r} is not a "
+                f"semver version or range. Branches and commit SHAs are not "
+                f"valid for registry-routed packages."
+            )
+
+        alias = entry.get("alias")
+        if alias is not None:
+            if not isinstance(alias, str) or not alias.strip():
+                raise ValueError("'alias' field must be a non-empty string")
+            alias = alias.strip()
+            if not re.match(r"^[a-zA-Z0-9._-]+$", alias):
+                raise ValueError(
+                    f"Invalid alias: {alias}. Aliases can only contain "
+                    f"letters, numbers, dots, underscores, and hyphens"
+                )
+
+        # Reject any unknown keys to catch typos early.
+        known = {"registry", "id", "path", "version", "alias"}
+        unknown = set(entry.keys()) - known
+        if unknown:
+            raise ValueError(
+                f"Object-form registry entry has unknown fields: "
+                f"{sorted(unknown)}. Known fields: {sorted(known)}"
+            )
+
+        # Build the DependencyReference. Identity stays ``owner/repo``;
+        # virtual_path stores the sub-path; reference holds the version.
+        owner_segments = pkg_id.split("/")
+        validate_path_segments(pkg_id, context="registry id")
+        for seg in owner_segments:
+            if not re.match(r"^[a-zA-Z0-9._-]+$", seg):
+                raise ValueError(f"Invalid registry id segment: {seg!r} in {pkg_id!r}")
+
+        return cls(
+            repo_url=pkg_id,
+            host=default_host(),  # registry-side identity is host-blind, but
+            # downstream code expects a host for routing
+            reference=version,
+            virtual_path=sub_path,
+            is_virtual=True,
+            alias=alias,
+            source="registry",
+            registry_name=registry_name,
+        )
 
     @classmethod
     def _detect_virtual_package(cls, dependency_str: str):
@@ -816,9 +998,7 @@ class DependencyReference:
             host = parts[0]
             if is_azure_devops_hostname(host) and len(parts) >= 4:
                 user_repo = "/".join(parts[1:4])
-            elif not is_github_hostname(host) and not is_azure_devops_hostname(
-                host
-            ):
+            elif not is_github_hostname(host) and not is_azure_devops_hostname(host):
                 if is_artifactory_path(parts[1:]):
                     art_result = parse_artifactory_path(parts[1:])
                     if art_result:
@@ -869,9 +1049,7 @@ class DependencyReference:
         allowed_pattern = (
             r"^[a-zA-Z0-9._\- ]+$" if is_ado_host else r"^[a-zA-Z0-9._-]+$"
         )
-        validate_path_segments(
-            "/".join(uparts), context="repository path"
-        )
+        validate_path_segments("/".join(uparts), context="repository path")
         for part in uparts:
             if not re.match(allowed_pattern, part.rstrip(".git")):
                 raise ValueError(f"Invalid repository path component: {part}")
@@ -974,7 +1152,9 @@ class DependencyReference:
         repo_url_lower = repo_url.lower()
 
         # For virtual packages without a URL scheme, narrow to just owner/repo
-        if is_virtual_package and not repo_url_lower.startswith(("https://", "http://")):
+        if is_virtual_package and not repo_url_lower.startswith(
+            ("https://", "http://")
+        ):
             host, repo_url = cls._resolve_virtual_shorthand_repo(
                 repo_url, validated_host
             )
@@ -1014,9 +1194,7 @@ class DependencyReference:
                     f"Invalid Azure DevOps repository format: {repo_url}. Expected 'org/project/repo'"
                 )
             ado_parts = repo_url.split("/")
-            validate_path_segments(
-                repo_url, context="Azure DevOps repository path"
-            )
+            validate_path_segments(repo_url, context="Azure DevOps repository path")
             return ado_parts[0], ado_parts[1], ado_parts[2]
 
         segments = repo_url.split("/")
@@ -1120,6 +1298,39 @@ class DependencyReference:
                 )
             )
 
+        # --- Registry-scope shorthand: owner/repo@<name>#<semver> ---
+        # Detected before any URL/host parsing so that the rest of the parse
+        # path sees a normal ``owner/repo#<ref>`` string. The semver
+        # constraint is enforced here (parse-time, not at install-time) per
+        # design §3.3.
+        registry_scope = cls._extract_registry_scope(dependency_str)
+        if registry_scope is not None:
+            repo_path, registry_name, ref = registry_scope
+            from ...deps.registry.feature_gate import require_package_registry_enabled
+
+            require_package_registry_enabled("Registry-scoped dependency shorthand")
+
+            if not ref:
+                raise ValueError(
+                    f"registry-scoped dependency '{dependency_str}' is missing a "
+                    f"version: shorthand routed to a registry must include "
+                    f"#<semver>, e.g. 'acme/foo@{registry_name}#^1.2.3'."
+                )
+            if not _is_valid_registry_semver_range(ref):
+                raise ValueError(
+                    f"'{dependency_str}' routes through registry "
+                    f"'{registry_name}' but '{ref}' is not a semver version or "
+                    f"range. Use an explicit '- git:' entry for branch or "
+                    f"commit-SHA pinning, or change the ref to a semver "
+                    f"version/range (e.g. ^1.0.0, ~1.2.3, 1.2.x)."
+                )
+            # Re-parse without the @<name> portion, then attach registry fields.
+            stripped = f"{repo_path}#{ref}"
+            dep = cls.parse(stripped)
+            dep.source = "registry"
+            dep.registry_name = registry_name
+            return dep
+
         # Phase 1: detect virtual packages
         is_virtual_package, virtual_path, validated_host = cls._detect_virtual_package(
             dependency_str
@@ -1161,9 +1372,7 @@ class DependencyReference:
         is_ado_final = host and is_azure_devops_hostname(host)
         artifactory_prefix = None
         if host and not is_ado_final:
-            artifactory_prefix = cls._extract_artifactory_prefix(
-                dependency_str, host
-            )
+            artifactory_prefix = cls._extract_artifactory_prefix(dependency_str, host)
 
         return cls(
             repo_url=repo_url,

@@ -33,6 +33,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from apm_cli.install.registry_wiring import (
+    get_registry_resolver,
+    registry_resolution_for_cached_registry_dep,
+    resolver_last_registry_resolution,
+)
 from apm_cli.utils.console import _rich_error, _rich_success
 
 if TYPE_CHECKING:
@@ -53,8 +58,7 @@ def _format_package_type_label(pkg_type) -> Optional[str]:
 
     return {
         PackageType.CLAUDE_SKILL: "Skill (SKILL.md detected)",
-        PackageType.MARKETPLACE_PLUGIN:
-            "Marketplace Plugin (plugin.json or agents/skills/commands)",
+        PackageType.MARKETPLACE_PLUGIN: "Marketplace Plugin (plugin.json or agents/skills/commands)",
         PackageType.HYBRID: "Hybrid (apm.yml + SKILL.md)",
         PackageType.APM_PACKAGE: "APM Package (apm.yml)",
         PackageType.HOOK_PACKAGE: "Hook Package (hooks/*.json only)",
@@ -199,18 +203,26 @@ class LocalDependencySource(DependencySource):
         local_info.package_type = pkg_type
         if pkg_type == PackageType.MARKETPLACE_PLUGIN:
             from apm_cli.deps.plugin_parser import normalize_plugin_directory
+
             normalize_plugin_directory(install_path, plugin_json_path)
 
         # Record for lockfile
         node = ctx.dependency_graph.dependency_tree.get_node(dep_key)
         depth = node.depth if node else 1
-        resolved_by = node.parent.dependency_ref.repo_url if node and node.parent else None
+        resolved_by = (
+            node.parent.dependency_ref.repo_url if node and node.parent else None
+        )
         _is_dev = node.is_dev if node else False
-        ctx.installed_packages.append(InstalledPackage(
-            dep_ref=dep_ref, resolved_commit=None,
-            depth=depth, resolved_by=resolved_by, is_dev=_is_dev,
-            registry_config=None,
-        ))
+        ctx.installed_packages.append(
+            InstalledPackage(
+                dep_ref=dep_ref,
+                resolved_commit=None,
+                depth=depth,
+                resolved_by=resolved_by,
+                is_dev=_is_dev,
+                registry_config=None,
+            )
+        )
         if install_path.is_dir() and not dep_ref.is_local:
             ctx.package_hashes[dep_key] = _compute_hash(install_path)
 
@@ -304,11 +316,15 @@ class CachedDependencySource(DependencySource):
                 source=dep_ref.repo_url,
             )
 
-        resolved_or_cached_ref = resolved_ref if resolved_ref else ResolvedReference(
-            original_ref=dep_ref.reference or "default",
-            ref_type=GitReferenceType.BRANCH,
-            resolved_commit="cached",
-            ref_name=dep_ref.reference or "default",
+        resolved_or_cached_ref = (
+            resolved_ref
+            if resolved_ref
+            else ResolvedReference(
+                original_ref=dep_ref.reference or "default",
+                ref_type=GitReferenceType.BRANCH,
+                resolved_commit="cached",
+                ref_name=dep_ref.reference or "default",
+            )
         )
 
         cached_package_info = PackageInfo(
@@ -325,7 +341,9 @@ class CachedDependencySource(DependencySource):
         # Collect for lockfile
         node = ctx.dependency_graph.dependency_tree.get_node(dep_key)
         depth = node.depth if node else 1
-        resolved_by = node.parent.dependency_ref.repo_url if node and node.parent else None
+        resolved_by = (
+            node.parent.dependency_ref.repo_url if node and node.parent else None
+        )
         _is_dev = node.is_dev if node else False
 
         # Determine commit SHA: resolved > callback > existing lockfile > reference
@@ -352,11 +370,28 @@ class CachedDependencySource(DependencySource):
         elif ctx.registry_config and not dep_ref.is_local:
             _cached_registry = ctx.registry_config
 
-        ctx.installed_packages.append(InstalledPackage(
-            dep_ref=dep_ref, resolved_commit=cached_commit,
-            depth=depth, resolved_by=resolved_by, is_dev=_is_dev,
-            registry_config=_cached_registry,
-        ))
+        _cached_resolution = None
+        if dep_ref.source == "registry":
+            from apm_cli.deps.registry.feature_gate import (
+                require_package_registry_enabled,
+            )
+
+            require_package_registry_enabled("Registry-sourced cached installs")
+            _cached_resolution = registry_resolution_for_cached_registry_dep(
+                ctx, dep_ref, dep_key, dep_locked_chk
+            )
+
+        ctx.installed_packages.append(
+            InstalledPackage(
+                dep_ref=dep_ref,
+                resolved_commit=cached_commit,
+                depth=depth,
+                resolved_by=resolved_by,
+                is_dev=_is_dev,
+                registry_config=_cached_registry,
+                registry_resolution=_cached_resolution,
+            )
+        )
         if install_path.is_dir():
             ctx.package_hashes[dep_key] = _compute_hash(install_path)
         if cached_package_info.package_type:
@@ -435,6 +470,41 @@ class FreshDependencySource(DependencySource):
 
             if dep_key in ctx.pre_download_results:
                 package_info = ctx.pre_download_results[dep_key]
+            elif dep_ref.source == "registry":
+                from apm_cli.deps.registry.feature_gate import (
+                    require_package_registry_enabled,
+                )
+
+                require_package_registry_enabled("Registry-sourced downloads")
+
+                # Registry-sourced dep: dispatch to the dedicated-registry
+                # resolver instead of the GitHub downloader. This branch
+                # fires when (a) the BFS callback skipped due to existing
+                # install path on a re-install, or (b) parallel pre-download
+                # was skipped (registry deps aren't pre-downloaded).
+                _registry_resolver = get_registry_resolver(ctx)
+                if _registry_resolver is None:
+                    raise RuntimeError(
+                        f"dep {dep_ref.repo_url!r} is registry-sourced but "
+                        f"no registry resolver was constructed (apm.yml may "
+                        f"be missing a 'registries:' block)."
+                    )
+                # Lockfile re-install path: registry_name might be absent —
+                # look it up from the lockfile's resolved_url.
+                from apm_cli.deps.registry.auth import (
+                    dependency_ref_with_registry_name_from_lockfile,
+                )
+
+                _regs = getattr(ctx.apm_package, "registries", None) or {}
+                download_ref = dependency_ref_with_registry_name_from_lockfile(
+                    download_ref,
+                    _regs,
+                    locked_dep=dep_locked_chk,
+                )
+                package_info = _registry_resolver.download_package(
+                    download_ref,
+                    install_path,
+                )
             else:
                 package_info = ctx.downloader.download_package(
                     download_ref,
@@ -455,9 +525,15 @@ class FreshDependencySource(DependencySource):
                 _sha = ""
                 if resolved:
                     _ref = resolved.ref_name if resolved.ref_name else ""
-                    _sha = resolved.resolved_commit[:8] if resolved.resolved_commit else ""
+                    _sha = (
+                        resolved.resolved_commit[:8] if resolved.resolved_commit else ""
+                    )
                 logger.download_complete(display_name, ref=_ref, sha=_sha)
-                if ctx.auth_resolver:
+                # Only emit the per-package git auth diagnostic for git deps.
+                # Registry-sourced deps don't talk to git hosts; resolving
+                # github.com auth here for them is misleading (and can issue
+                # network calls via auth.AuthResolver providers).
+                if ctx.auth_resolver and dep_ref.source in (None, "git"):
                     try:
                         _host = dep_ref.host or "github.com"
                         _org = (
@@ -465,7 +541,9 @@ class FreshDependencySource(DependencySource):
                             if dep_ref.repo_url and "/" in dep_ref.repo_url
                             else None
                         )
-                        _ctx = ctx.auth_resolver.resolve(_host, org=_org, port=dep_ref.port)
+                        _ctx = ctx.auth_resolver.resolve(
+                            _host, org=_org, port=dep_ref.port
+                        )
                         logger.package_auth(_ctx.source, _ctx.token_type or "none")
                     except Exception:
                         pass
@@ -473,7 +551,9 @@ class FreshDependencySource(DependencySource):
                 _ref_suffix = ""
                 if resolved:
                     _r = resolved.ref_name if resolved.ref_name else ""
-                    _s = resolved.resolved_commit[:8] if resolved.resolved_commit else ""
+                    _s = (
+                        resolved.resolved_commit[:8] if resolved.resolved_commit else ""
+                    )
                     if _r and _s:
                         _ref_suffix = f" #{_r} @{_s}"
                     elif _r:
@@ -495,11 +575,27 @@ class FreshDependencySource(DependencySource):
                 node.parent.dependency_ref.repo_url if node and node.parent else None
             )
             _is_dev = node.is_dev if node else False
-            ctx.installed_packages.append(InstalledPackage(
-                dep_ref=dep_ref, resolved_commit=resolved_commit,
-                depth=depth, resolved_by=resolved_by, is_dev=_is_dev,
-                registry_config=ctx.registry_config if not dep_ref.is_local else None,
-            ))
+            # Registry-sourced deps: pull the captured resolution out of
+            # the resolver's per-graph map so the lockfile records
+            # resolved_url + resolved_hash + version (design §6.1).
+            _registry_resolution = (
+                resolver_last_registry_resolution(ctx, dep_key)
+                if dep_ref.source == "registry"
+                else None
+            )
+            ctx.installed_packages.append(
+                InstalledPackage(
+                    dep_ref=dep_ref,
+                    resolved_commit=resolved_commit,
+                    depth=depth,
+                    resolved_by=resolved_by,
+                    is_dev=_is_dev,
+                    registry_config=(
+                        ctx.registry_config if not dep_ref.is_local else None
+                    ),
+                    registry_resolution=_registry_resolution,
+                )
+            )
             if install_path.is_dir():
                 ctx.package_hashes[dep_key] = _compute_hash(install_path)
 
@@ -588,9 +684,20 @@ def make_dependency_source(
         return LocalDependencySource(ctx, dep_ref, install_path, dep_key)
     if skip_download:
         return CachedDependencySource(
-            ctx, dep_ref, install_path, dep_key, resolved_ref, dep_locked_chk,
+            ctx,
+            dep_ref,
+            install_path,
+            dep_key,
+            resolved_ref,
+            dep_locked_chk,
         )
     return FreshDependencySource(
-        ctx, dep_ref, install_path, dep_key,
-        resolved_ref, dep_locked_chk, ref_changed, progress,
+        ctx,
+        dep_ref,
+        install_path,
+        dep_key,
+        resolved_ref,
+        dep_locked_chk,
+        ref_changed,
+        progress,
     )

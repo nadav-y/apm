@@ -34,6 +34,8 @@ For Azure DevOps, APM resolves credentials in this order: `ADO_APM_PAT` env var,
 
 For Artifactory registry proxies, use `PROXY_REGISTRY_TOKEN`. See [Registry proxy (Artifactory)](#registry-proxy-artifactory) below.
 
+For dedicated APM registries (`registries:` block in `apm.yml`), use `APM_REGISTRY_TOKEN_{NAME}`. See [Registry tokens](#registry-tokens) below.
+
 For runtime features (`GITHUB_COPILOT_PAT`), see [Agent Workflows](../../guides/agent-workflows/).
 
 ### Configuration variables
@@ -241,6 +243,26 @@ The following env vars still work but emit a `DeprecationWarning`. Migrate to th
 | `ARTIFACTORY_BASE_URL` | `PROXY_REGISTRY_URL` |
 | `ARTIFACTORY_APM_TOKEN` | `PROXY_REGISTRY_TOKEN` |
 | `ARTIFACTORY_ONLY` | `PROXY_REGISTRY_ONLY` |
+
+## Registry tokens
+
+Dedicated APM registries (declared via the top-level `registries:` block in `apm.yml`) use a dedicated env-var prefix that is **distinct** from `GITHUB_APM_PAT_*`, `PROXY_REGISTRY_*`, and `ARTIFACTORY_APM_TOKEN` — there is no collision with Git auth.
+
+Package registries are experimental. Run `apm experimental enable package-registry` before using these tokens with `registries:` entries.
+
+| Env var | Auth method |
+|---|---|
+| `APM_REGISTRY_TOKEN_{NAME}` | `Authorization: Bearer <token>` |
+| `APM_REGISTRY_USER_{NAME}` + `APM_REGISTRY_PASS_{NAME}` | `Authorization: Basic <base64(user:pass)>` |
+
+`{NAME}` is the registry name from `apm.yml`, uppercased, with `-` and `.` mapped to `_` (e.g. `jf-skills` -> `JF_SKILLS`). When both forms are set, Bearer wins. When neither is set, APM tries the request anonymously and surfaces a remediation message on `401`/`403`.
+
+```bash
+export APM_REGISTRY_TOKEN_JF_SKILLS=eyJ...
+apm install
+```
+
+For the full registry workflow — declaring registries, scoping dependencies, and lockfile semantics — see the [Registries guide](../../guides/registries/).
 
 ## Troubleshooting
 

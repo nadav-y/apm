@@ -49,6 +49,7 @@ target:        <enum>
 type:          <enum>
 scripts:       <map<string, string>>
 includes:      <enum | list<string>>
+registries:    <map<string, RegistryEntry> & {default?: <string>}>
 dependencies:
   apm:         <list<ApmDependency>>
   mcp:         <list<McpDependency>>
@@ -218,6 +219,35 @@ policy:
 | `hash` | `string` | unset | `<algo>:<hex-digest>` (e.g. `sha256:6a8c...e2f1`) | Pin on the raw bytes of the fetched leaf org policy. Verified before YAML parsing; mismatch is always fail-closed regardless of `fetch_failure_default`. See [Hash pin: `policy.hash`](../../enterprise/policy-reference/#96-hash-pin-policyhash-consumer-side-verification). |
 | `hash_algorithm` | `string` | `sha256` | `sha256`, `sha384`, `sha512` | Digest algorithm for `policy.hash`. Inferred from the `<algo>:` prefix when present; this field is the explicit override. MD5 and SHA-1 are rejected at parse time. |
 
+### 3.11. `registries`
+
+::::caution[Experimental]
+The `registries:` field and registry-routed APM dependency forms require `apm experimental enable package-registry`.
+::::
+
+| | |
+|---|---|
+| **Type** | `map<string, RegistryEntry>` with optional `default: <string>` key |
+| **Required** | OPTIONAL |
+| **Description** | Declares REST-based APM registries. Strictly additive — absent or empty block leaves all dependency resolution unchanged. |
+
+```yaml
+registries:
+  jf-skills:
+    url: https://artifactory.example.com/artifactory/api/skills/jf-skills-local
+  default: jf-skills           # OPTIONAL — name of one of the configured entries
+```
+
+| Sub-key | Type | Required | Constraint | Semantic |
+|---|---|---|---|---|
+| `<name>` | `RegistryEntry` | at least one when block is non-empty | Name uses lowercase letters, digits, `-`, `.` | Registered registry. |
+| `<name>.url` | `string` | REQUIRED per entry | MUST start with `https://` or `http://`; no trailing slash required | Base URL the client appends `/v1/...` paths to. |
+| `default` | `string` | OPTIONAL | MUST name one of the configured entries | When set, plain string-shorthand APM deps without an explicit `@<name>` route through this registry. |
+
+Unknown keys under a registry entry MUST be rejected at parse time (typo guard).
+
+For full client semantics — auth, lockfile fields, and routing rules — see the [Registries guide](../../guides/registries/). For the wire contract servers implement, see the [Registry HTTP API](../registry-http-api/).
+
 ---
 
 ## 4. Dependencies
@@ -241,11 +271,14 @@ Each element MUST be one of two forms: **string** or **object**.
 Grammar (ABNF-style):
 
 ```
-dependency     = url_form / shorthand_form / local_path_form
+dependency     = url_form / shorthand_form / registry_form / local_path_form
 url_form       = ("https://" / "http://" / "ssh://git@" / "git@") clone-url
 shorthand_form = [host "/"] owner "/" repo ["/" virtual_path] ["#" ref]
+registry_form  = owner "/" repo "@" registry-name "#" semver-range
 local_path_form = ("./" / "../" / "/" / "~/" / ".\\" / "..\\" / "~\\") path
 ```
+
+The `registry_form` (`owner/repo@<name>#<semver>`) routes the entry to a registry declared in the top-level `registries:` block (§3.11). The `#<semver>` portion is REQUIRED — branch refs and commit SHAs are rejected at parse time. Registry ranges use the same full-version semver grammar as marketplace builds (for example, `^1.2.3`, `~1.2.3`, `>=1.2.0 <2.0.0`). When `registries.default` is set, plain `shorthand_form` entries without `@<name>` route through the default registry and are also subject to the strict-semver requirement.
 
 `clone-url` MAY include a `:port` segment on `https://`, `http://`, and `ssh://git@` forms (e.g. `ssh://git@host:7999/owner/repo.git`). The SCP shorthand `git@host:path` cannot carry a port — `:` is the path separator in that form. When a port is present, APM preserves it across all clone attempts: the SSH attempt uses `ssh://host:PORT/...` and the HTTPS fallback uses `https://host:PORT/...` (same port on both protocols).
 
@@ -318,6 +351,18 @@ Local path dependency (development only):
 ```yaml
 - path: ./packages/my-shared-skills
 ```
+
+Registry virtual-package dependency (whole-package registry deps SHOULD use the `@<name>` shorthand; this object form is REQUIRED only for virtuals):
+
+```yaml
+- registry: jf-skills              # REQUIRED — name from registries: block
+  id: acme/prompt-pack             # REQUIRED — owner/repo identity at the registry
+  path: prompts/review.prompt.md   # REQUIRED — virtual sub-path inside the package
+  version: 1.4.0                   # REQUIRED — semver version or range
+  alias: review                    # OPTIONAL
+```
+
+`registry:` and `git:` are mutually exclusive on the same entry. Branch refs and commit SHAs are rejected on `version:`.
 
 #### 4.1.3. Virtual Packages
 

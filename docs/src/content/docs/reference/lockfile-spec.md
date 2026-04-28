@@ -15,8 +15,11 @@ sidebar:
 
 ## Status of This Document
 
-This is a **Working Draft**. The lock file format is stable at version `"1"` and
-breaking changes will be gated behind a `lockfile_version` bump.
+This is a **Working Draft**. The lock file format has two versions in use:
+`"1"` (Git-only projects) and `"2"` (projects with at least one registry-sourced
+dependency). The bump is opportunistic — see [section 4.6](#46-version-bumping).
+Registry-sourced dependencies require the experimental package registry feature
+(`apm experimental enable package-registry`) before install or replay.
 
 ## Abstract
 
@@ -96,7 +99,7 @@ dependencies:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `lockfile_version` | string | MUST | Lock file format version. Currently `"1"`. |
+| `lockfile_version` | string | MUST | Lock file format version. `"1"` for Git-only projects, `"2"` when any dependency has `source: registry`. See [section 4.6](#46-version-bumping). |
 | `generated_at` | string (ISO 8601) | MUST | UTC timestamp of when the lock file was last written. |
 | `apm_version` | string | MUST | Version of APM that generated this lock file. |
 | `dependencies` | array | MUST | Ordered list of resolved dependencies (see [section 4.2](#42-dependency-entries)). |
@@ -124,7 +127,9 @@ fields:
 | `content_hash` | string | MAY | SHA-256 hash of the package file tree, in the format `"sha256:<hex>"`. Used to verify cached packages on subsequent installs. Omitted for local path dependencies. See [section 4.4](#44-content-integrity). |
 | `is_dev` | boolean | MAY | `true` if the dependency was resolved through [`devDependencies`](../manifest-schema/#5-devdependencies). Omitted when `false`. Dev deps are excluded from `apm pack --format plugin` bundles. |
 | `deployed_files` | array of strings | MUST | Every file path APM deployed for this dependency, relative to project root. |
-| `source` | string | MAY | Dependency source. `"local"` for local path dependencies. Omitted for remote (git) dependencies. |
+| `source` | string | MAY | Dependency source discriminator. `"local"` for local path dependencies, `"registry"` for dedicated-registry resolutions. Omitted for remote (git) dependencies. |
+| `resolved_url` | string | MUST when `source: "registry"` | Fully-qualified `/v1/...download` URL the archive was fetched from. Trust anchor for re-installs — APM re-fetches from this URL, not from the registry name. |
+| `resolved_hash` | string | MUST when `source: "registry"` | `"sha256:<hex>"` digest of the registry archive bytes. Re-verified on every install before extraction. |
 | `local_path` | string | MAY | Filesystem path (relative or absolute) to the local package. Present only when `source` is `"local"`. |
 | `is_insecure` | boolean | MAY | `true` when the dep was fetched over HTTP (unencrypted). Omitted when `false`. Presence forces re-approval on the next install: the apm.yml entry MUST carry `allow_insecure: true` and the invocation MUST pass `--allow-insecure` (or `--allow-insecure-host` for transitive deps). Absent or `false` means HTTPS/SSH. |
 | `allow_insecure` | boolean | MAY | `true` when the user's manifest explicitly approved the HTTP fetch with `allow_insecure: true`. Persisted alongside `is_insecure` for replay safety: a legacy lockfile with `is_insecure: true` but no `allow_insecure` fail-closes to `allow_insecure: false`, forcing re-approval. Omitted when `false`. |
@@ -196,6 +201,40 @@ without requiring exporters to special-case the self-entry.
 Consumers iterating `dependencies` SHOULD treat the `"."` key as the host
 project. Consumers reading the on-disk YAML directly will not see this entry --
 they MUST read `local_deployed_files` and `local_deployed_file_hashes` instead.
+
+### 4.6 Version Bumping
+
+The lock file uses two schema versions:
+
+| Version | Triggered by | Adds |
+|---|---|---|
+| `"1"` | Default for Git-only projects. | Baseline schema. |
+| `"2"` | Any dependency with `source: "registry"`. | `resolved_url`, `resolved_hash`, and the `version` field on registry entries. |
+
+The bump is **opportunistic**: a project that never opts into a registry keeps
+`lockfile_version: "1"` forever, even on a newer client. The first registry
+dep added to the graph promotes the lockfile to `"2"`; if every registry dep is
+later removed, the next write demotes back to `"1"`. Both versions are valid
+on-disk formats; consumers MUST handle either.
+
+A v2 dependency entry looks like:
+
+```yaml
+lockfile_version: "2"
+
+dependencies:
+  - repo_url: acme/foo
+    source: registry
+    version: "1.4.0"
+    resolved_url: https://artifactory.example.com/artifactory/api/skills/jf-skills-local/v1/packages/acme/foo/versions/1.4.0/download
+    resolved_hash: "sha256:abc123..."
+    depth: 1
+    package_type: apm_package
+    deployed_files:
+      - .github/skills/foo/SKILL.md
+```
+
+For the registry workflow this enables, see the [Registries guide](../../guides/registries/).
 
 ## 5. Path Conventions
 
