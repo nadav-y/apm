@@ -21,6 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from apm_cli.install.phases.update_backup import (
     _sanitize_backup_name,
@@ -145,6 +148,27 @@ class TestBackupBeforeOverwrite:
 
         _, backup_path = ctx.update_backups["owner/repo"]
         assert _read(backup_path) == "second"
+
+    def test_staging_failure_raises_instead_of_proceeding_unbacked(self, tmp_path: Path) -> None:
+        """A rename failure must fail closed (raise), not swallow the error
+        and return False. Silently proceeding would let the caller overwrite
+        install_path with no rollback point staged -- a later declined/
+        aborted update would then see this dep as downloaded but with no
+        backup entry, indistinguishable from a fresh add, and delete it
+        outright, permanently losing the original content."""
+        install_path = tmp_path / "apm_modules" / "owner" / "repo"
+        _write(install_path, "old")
+        dep = _FakeDep("owner/repo")
+        ctx = self._ctx(apm_dir=tmp_path)
+
+        with (
+            patch.object(Path, "rename", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            backup_before_overwrite(ctx, dep, install_path)
+
+        assert install_path.exists()  # untouched -- caller must not proceed to overwrite
+        assert "owner/repo" not in getattr(ctx, "update_backups", {})
 
 
 class TestRestoreUpdateBackups:

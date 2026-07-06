@@ -86,6 +86,18 @@ def backup_before_overwrite(
     (``apm install --update`` has no decline path, so backing up would
     only add filesystem churn with nothing that ever reads it back).
 
+    Raises on failure once staging is actually required (``plan_callback``
+    is set and ``install_path`` exists). Swallowing the error here would
+    let the caller proceed straight to overwriting ``install_path`` with
+    no rollback point staged -- a later declined/aborted update would then
+    see this dep in ``ctx.callback_downloaded`` but not ``ctx.update_backups``,
+    indistinguishable from a fresh add, and delete it outright,
+    permanently losing the original content. Raising instead surfaces to
+    the ``resolve``-phase exception handler in ``pipeline.py``, which
+    restores any backups already staged for other deps this run before
+    re-raising -- the whole ``apm update`` aborts cleanly, which is
+    recoverable; a silent, undetected loss of the original content is not.
+
     Returns True when a backup was actually staged, so the caller can
     log accordingly.
     """
@@ -96,24 +108,22 @@ def backup_before_overwrite(
     backup_root = ctx.apm_dir / ".apm-update-backup"
     dep_key = dep_ref.get_unique_key()
     backup_path = backup_root / _sanitize_backup_name(dep_key)
-    with suppress(Exception):
-        if backup_path.exists():
-            _rrm(backup_path, ignore_errors=True)
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
-        install_path.rename(backup_path)
-        if not isinstance(getattr(ctx, "update_backups", None), dict):
-            ctx.update_backups = {}
-        # The dep_ref is stored alongside the path (not just the path) so
-        # restore_update_backups can compute get_install_path() directly,
-        # without needing to look this dep up in all_apm_deps/
-        # deps_to_install afterward. Those two lists are direct-only /
-        # only-populated-on-success respectively -- a transitive dep
-        # backed up here and then caught by a resolution failure elsewhere
-        # (before deps_to_install is ever set) would otherwise be
-        # unresolvable and its backup permanently orphaned.
-        ctx.update_backups[dep_key] = (dep_ref, backup_path)
-        return True
-    return False
+    if backup_path.exists():
+        _rrm(backup_path, ignore_errors=True)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    install_path.rename(backup_path)
+    if not isinstance(getattr(ctx, "update_backups", None), dict):
+        ctx.update_backups = {}
+    # The dep_ref is stored alongside the path (not just the path) so
+    # restore_update_backups can compute get_install_path() directly,
+    # without needing to look this dep up in all_apm_deps/
+    # deps_to_install afterward. Those two lists are direct-only /
+    # only-populated-on-success respectively -- a transitive dep
+    # backed up here and then caught by a resolution failure elsewhere
+    # (before deps_to_install is ever set) would otherwise be
+    # unresolvable and its backup permanently orphaned.
+    ctx.update_backups[dep_key] = (dep_ref, backup_path)
+    return True
 
 
 def restore_update_backups(ctx: InstallContext, *, keep_new: bool) -> None:
