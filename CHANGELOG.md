@@ -137,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was silently ignored by `apm update` in `pkg1` even though `pkg2`'s
   manifest allowed it. The staged-download/rollback protection from #2050
   now applies uniformly at every depth reached this way. (by @nadav-y)
+  (#2053)
 
 ## [0.24.0] - 2026-07-05
 
