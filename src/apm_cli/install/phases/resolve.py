@@ -409,6 +409,8 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
     # lookups and static analysis can see the dependency.
     from apm_cli.drift import build_download_ref, detect_ref_change
 
+    from .update_backup import backup_before_overwrite
+
     verbose = ctx.verbose  # noqa: F841
 
     def download_callback(dep_ref, modules_dir, parent_chain="", parent_pkg=None):
@@ -516,6 +518,15 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
                         )
                         callback_downloaded[dep_ref.get_unique_key()] = None
                         return install_path
+                # Stage a rollback point before extraction overwrites
+                # install_path -- covers this dep whether it's direct or
+                # transitive (see update_backup.backup_before_overwrite).
+                # No-ops when there's nothing to protect (fresh add) or no
+                # plan-confirmation gate to potentially decline. Dict-key
+                # writes on distinct dep keys are GIL-atomic, matching the
+                # lock-free pattern already used for callback_downloaded
+                # elsewhere in this callback.
+                backup_before_overwrite(ctx, dep_ref, install_path)
                 registry_resolver.download_package(dep_ref, install_path)
                 _annotate_registry_dep_ref(dep_ref, registry_resolver)
                 # Mark as already-downloaded so the parallel pre-download
@@ -632,6 +643,13 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
                 ref_changed=_ref_changed,
             )
 
+            # Stage a rollback point before the clone/cache-copy overwrites
+            # install_path -- covers this dep whether it's direct or
+            # transitive (see update_backup.backup_before_overwrite).
+            # No-ops when there's nothing to protect (fresh add) or no
+            # plan-confirmation gate to potentially decline.
+            backup_before_overwrite(ctx, dep_ref, install_path)
+
             # Silent download - no progress display for transitive deps
             result = downloader.download_package(download_dep, install_path)
             # Capture resolved commit SHA for lockfile
@@ -703,30 +721,19 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
     # ------------------------------------------------------------------
     # 6. Resolver creation + dependency resolution
     # ------------------------------------------------------------------
-    if update_refs:
-        # A plan-confirmation gate (``apm update``) can decline after this
-        # point, or the pipeline can abort before ever reaching it
-        # (non-interactive shell, --dry-run) -- stage the purged content
-        # so ``restore_update_backups`` can put it back rather than
-        # leaving apm_modules/ ahead of apm.lock.yaml. Callers with no
-        # gate (``apm install --update``) always apply, so purge-by-delete
-        # is unchanged for them.
-        from .update_backup import purge_cached_semver_paths_for_update
-
-        _backup_root = (
-            ctx.apm_dir / ".apm-update-backup" if getattr(ctx, "plan_callback", None) else None
-        )
-        ctx.update_backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=ctx.all_apm_deps,
-            apm_modules_dir=ctx.apm_modules_dir,
-            logger=ctx.logger,
-            backup_root=_backup_root,
-        )
-
+    # No pre-purge pass here: APMDependencyResolver's own
+    # _should_force_recheck (passed update_refs below) gives
+    # download_callback a chance to run for any semver-ranged dep whose
+    # install path already exists, at any depth -- direct or transitive --
+    # without needing to know the tree shape upfront. download_callback
+    # backs up the existing path (see backup_before_overwrite,
+    # update_backup.py) at the exact moment it's about to overwrite it,
+    # covering any dep it reaches uniformly.
     resolver = APMDependencyResolver(
         apm_modules_dir=ctx.apm_modules_dir,
         download_callback=download_callback,
         auth_resolver=ctx.auth_resolver,
+        update_refs=update_refs,
     )
 
     # Resolver reads ``<anchor>/apm.yml``. Preserve the original

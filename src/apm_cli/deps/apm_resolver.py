@@ -80,6 +80,7 @@ class APMDependencyResolver:
         download_callback: DownloadCallback | None = None,
         max_parallel: int | None = None,
         auth_resolver: object | None = None,
+        update_refs: bool = False,
     ):
         """Initialize the resolver with maximum recursion depth.
 
@@ -97,9 +98,21 @@ class APMDependencyResolver:
                 for parity-testing against the legacy sequential path
                 -- this is a diagnostic knob, not a user toggle.
             auth_resolver: Optional auth resolver for marketplace dependency resolution.
+            update_refs: Whether this resolution is an ``apm update`` /
+                ``apm install --update`` run. When True, a dependency whose
+                install path already exists still gets a chance to call
+                ``download_callback`` if its own reference is a semver range
+                (see ``_should_force_recheck``) -- this applies uniformly at
+                every depth, not just to direct dependencies, so a
+                transitive dep's own semver range gets re-evaluated against
+                the remote even when nothing *above* it in the tree changed.
+                ``download_callback`` itself (see ``install/phases/
+                resolve.py``) decides whether anything actually needs
+                re-fetching; this flag only controls whether it gets asked.
         """
         self.max_depth = max_depth
         self._apm_modules_dir: Path | None = apm_modules_dir
+        self._update_refs = update_refs
         self._project_root: Path | None = None
         self._download_callback = download_callback
         # Whether ``download_callback`` accepts ``parent_pkg`` (added in #857).
@@ -944,6 +957,26 @@ class APMDependencyResolver:
         except (ValueError, FileNotFoundError) as exc:
             return (item, None, exc)
 
+    def _should_force_recheck(self, dep_ref: DependencyReference) -> bool:
+        """True when *dep_ref* must be given a chance to call ``download_callback``
+        even though its install path already exists on disk.
+
+        Mirrors ``download_callback``'s own ``_force_semver_resolve`` predicate
+        (see ``install/phases/resolve.py``) -- kept in sync deliberately, since
+        that check is otherwise unreachable: without this, ``download_callback``
+        is only ever invoked when the install path is missing, so a semver
+        range on a dependency whose path already exists (any transitive dep
+        beneath a level that itself didn't change) never gets re-evaluated
+        against the remote during ``apm update``, no matter how many newer
+        matching versions have been published.
+        """
+        return (
+            self._update_refs
+            and not dep_ref.is_local
+            and not getattr(dep_ref, "artifactory_prefix", None)
+            and getattr(dep_ref, "ref_kind", None) == "semver"
+        )
+
     def _try_load_dependency_package(
         self,
         dep_ref: DependencyReference,
@@ -996,8 +1029,15 @@ class APMDependencyResolver:
         # Get the canonical install path for this dependency
         install_path = dep_ref.get_install_path(self._apm_modules_dir)
 
-        # If package doesn't exist locally, try to download it
-        if not install_path.exists():
+        # If package doesn't exist locally, try to download it. Also give
+        # download_callback a chance when the path DOES exist but this is an
+        # ``apm update`` re-check of a semver-ranged dep (see
+        # _should_force_recheck) -- otherwise a transitive dependency's own
+        # semver range is never re-evaluated against the remote unless
+        # something *above* it in the tree also changed and forced a fresh
+        # fetch. download_callback decides internally whether anything
+        # actually needs re-fetching; this only controls whether it's asked.
+        if not install_path.exists() or self._should_force_recheck(dep_ref):
             if self._download_callback is not None:
                 unique_key = self._download_dedup_key(dep_ref, parent_pkg)
                 # Avoid re-downloading the same logical (dep_ref, anchor) pair

@@ -6,6 +6,14 @@ non-interactive abort (no TTY, no ``--yes``), or ``--dry-run`` left
 ``apm.lock.yaml`` stayed on the old one -- because ``download_callback``
 materialises the new content to disk during resolve, before the plan-
 confirmation gate ever runs. See ``update_backup.py`` for the mechanism.
+
+Also covers the extension of that protection to transitive dependencies:
+``backup_before_overwrite`` is called inline from ``download_callback``
+at the moment a dep's install path is about to be overwritten, rather
+than a standalone pre-pass that only knew about direct deps -- so a
+dependency several levels deep, re-checked only because a package above
+it in the tree also happened to be re-checked, gets exactly the same
+protection.
 """
 
 from __future__ import annotations
@@ -16,7 +24,7 @@ from types import SimpleNamespace
 
 from apm_cli.install.phases.update_backup import (
     _sanitize_backup_name,
-    purge_cached_semver_paths_for_update,
+    backup_before_overwrite,
     restore_update_backups,
 )
 
@@ -72,97 +80,71 @@ class TestSanitizeBackupName:
         assert re.fullmatch(r"[A-Za-z0-9._-]+", name)
 
 
-class TestPurgeCachedSemverPathsForUpdate:
-    def test_no_backup_root_deletes_outright(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
+class TestBackupBeforeOverwrite:
+    """``backup_before_overwrite`` is called inline from ``download_callback``,
+    at the exact moment a dep's install path is about to be overwritten --
+    for a direct OR a transitive dep alike, since the decision only depends
+    on that dep's own install path and whether a plan-confirmation gate
+    exists, not on knowing the tree shape upfront."""
+
+    def _ctx(self, *, apm_dir: Path, plan_callback=True):
+        return SimpleNamespace(apm_dir=apm_dir, plan_callback=plan_callback)
+
+    def test_no_plan_callback_is_a_noop(self, tmp_path: Path) -> None:
+        """apm install --update has no decline path -- nothing to protect
+        against, so backing up would only add filesystem churn."""
+        install_path = tmp_path / "apm_modules" / "owner" / "repo"
+        _write(install_path, "old")
         dep = _FakeDep("owner/repo")
-        _write(dep.get_install_path(modules), "old")
+        ctx = self._ctx(apm_dir=tmp_path, plan_callback=None)
 
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep], apm_modules_dir=modules, logger=None
-        )
+        staged = backup_before_overwrite(ctx, dep, install_path)
 
-        assert backups == {}
-        assert not dep.get_install_path(modules).exists()
-
-    def test_backup_root_moves_content_aside(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
-        backup_root = tmp_path / ".apm-update-backup"
-        dep = _FakeDep("owner/repo")
-        _write(dep.get_install_path(modules), "old")
-
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep],
-            apm_modules_dir=modules,
-            logger=None,
-            backup_root=backup_root,
-        )
-
-        assert not dep.get_install_path(modules).exists()
-        assert "owner/repo" in backups
-        assert _read(backups["owner/repo"]) == "old"
-
-    def test_skips_non_semver_deps(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
-        backup_root = tmp_path / ".apm-update-backup"
-        dep = _FakeDep("owner/repo", ref_kind="literal")
-        _write(dep.get_install_path(modules), "old")
-
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep],
-            apm_modules_dir=modules,
-            logger=None,
-            backup_root=backup_root,
-        )
-
-        assert backups == {}
-        assert dep.get_install_path(modules).exists()
-
-    def test_skips_local_deps(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
-        backup_root = tmp_path / ".apm-update-backup"
-        dep = _FakeDep("owner/repo", is_local=True)
-        _write(dep.get_install_path(modules), "old")
-
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep],
-            apm_modules_dir=modules,
-            logger=None,
-            backup_root=backup_root,
-        )
-
-        assert backups == {}
-        assert dep.get_install_path(modules).exists()
-
-    def test_skips_artifactory_deps(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
-        backup_root = tmp_path / ".apm-update-backup"
-        dep = _FakeDep("owner/repo", artifactory_prefix="proxy")
-        _write(dep.get_install_path(modules), "old")
-
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep],
-            apm_modules_dir=modules,
-            logger=None,
-            backup_root=backup_root,
-        )
-
-        assert backups == {}
-        assert dep.get_install_path(modules).exists()
+        assert staged is False
+        assert install_path.exists()
+        assert not (tmp_path / ".apm-update-backup").exists()
 
     def test_missing_install_path_is_a_noop(self, tmp_path: Path) -> None:
-        modules = tmp_path / "apm_modules"
-        backup_root = tmp_path / ".apm-update-backup"
-        dep = _FakeDep("owner/repo")  # never created on disk
+        """A fresh add has nothing to back up."""
+        install_path = tmp_path / "apm_modules" / "owner" / "repo"
+        dep = _FakeDep("owner/repo")
+        ctx = self._ctx(apm_dir=tmp_path)
 
-        backups = purge_cached_semver_paths_for_update(
-            all_apm_deps=[dep],
-            apm_modules_dir=modules,
-            logger=None,
-            backup_root=backup_root,
-        )
+        staged = backup_before_overwrite(ctx, dep, install_path)
 
-        assert backups == {}
+        assert staged is False
+        assert not (tmp_path / ".apm-update-backup").exists()
+
+    def test_backs_up_existing_content_and_records_dep_ref(self, tmp_path: Path) -> None:
+        install_path = tmp_path / "apm_modules" / "owner" / "repo"
+        _write(install_path, "old")
+        dep = _FakeDep("owner/repo")
+        ctx = self._ctx(apm_dir=tmp_path)
+
+        staged = backup_before_overwrite(ctx, dep, install_path)
+
+        assert staged is True
+        assert not install_path.exists()  # moved aside, not copied
+        assert "owner/repo" in ctx.update_backups
+        stored_dep, backup_path = ctx.update_backups["owner/repo"]
+        assert stored_dep is dep
+        assert _read(backup_path) == "old"
+
+    def test_second_call_for_same_dep_overwrites_stale_backup(self, tmp_path: Path) -> None:
+        """A dep re-checked twice in the same run (shouldn't normally happen,
+        but the dedup key covers it) must not fail on an already-occupied
+        backup slot from a previous call."""
+        install_path = tmp_path / "apm_modules" / "owner" / "repo"
+        dep = _FakeDep("owner/repo")
+        ctx = self._ctx(apm_dir=tmp_path)
+
+        _write(install_path, "first")
+        assert backup_before_overwrite(ctx, dep, install_path) is True
+        _write(install_path, "second")
+        assert backup_before_overwrite(ctx, dep, install_path) is True
+
+        _, backup_path = ctx.update_backups["owner/repo"]
+        assert _read(backup_path) == "second"
 
 
 class TestRestoreUpdateBackups:
@@ -186,7 +168,7 @@ class TestRestoreUpdateBackups:
             modules_dir=modules,
             deps=[dep],
             downloaded={"owner/repo": None},
-            backups={"owner/repo": backup_root / "owner_repo"},
+            backups={"owner/repo": (dep, backup_root / "owner_repo")},
         )
 
         restore_update_backups(ctx, keep_new=True)
@@ -206,7 +188,7 @@ class TestRestoreUpdateBackups:
             modules_dir=modules,
             deps=[dep],
             downloaded={"owner/repo": None},
-            backups={"owner/repo": backup_root / "owner_repo"},
+            backups={"owner/repo": (dep, backup_root / "owner_repo")},
         )
 
         restore_update_backups(ctx, keep_new=False)
@@ -233,21 +215,21 @@ class TestRestoreUpdateBackups:
         assert not dep.get_install_path(modules).exists()
 
     def test_committed_but_not_downloaded_still_restores(self, tmp_path: Path) -> None:
-        """A dep purged for re-resolution but whose callback never actually ran
-        (e.g. an earlier failure aborted the graph walk) must not end up with an
-        empty install path even though the overall run is committed."""
+        """A dep backed up for re-resolution but whose callback never actually
+        ran (e.g. an earlier failure aborted the graph walk) must not end up
+        with an empty install path even though the overall run is committed."""
         modules = tmp_path / "apm_modules"
         backup_root = tmp_path / ".apm-update-backup"
         dep = _FakeDep("owner/repo")
         _write(backup_root / "owner_repo", "old")
-        # Note: install path was purged and NOT re-created -- simulates the
-        # callback never reaching this dep.
+        # Note: install path was backed up and NOT re-created -- simulates
+        # the callback never reaching this dep.
 
         ctx = self._ctx(
             modules_dir=modules,
             deps=[dep],
             downloaded={},  # callback never ran for this dep
-            backups={"owner/repo": backup_root / "owner_repo"},
+            backups={"owner/repo": (dep, backup_root / "owner_repo")},
         )
 
         restore_update_backups(ctx, keep_new=True)
@@ -272,7 +254,7 @@ class TestRestoreUpdateBackups:
             modules_dir=modules,
             deps=[dep],
             downloaded={"owner/repo": None},
-            backups={"owner/repo": backup_root / "owner_repo"},
+            backups={"owner/repo": (dep, backup_root / "owner_repo")},
         )
 
         restore_update_backups(ctx, keep_new=False)
@@ -295,10 +277,40 @@ class TestRestoreUpdateBackups:
             modules_dir=modules,
             deps=[dep_a, dep_b],
             downloaded={"owner/a": None, "owner/b": None},
-            backups={"owner/a": backup_root / "owner_a", "owner/b": backup_root / "owner_b"},
+            backups={
+                "owner/a": (dep_a, backup_root / "owner_a"),
+                "owner/b": (dep_b, backup_root / "owner_b"),
+            },
         )
 
         restore_update_backups(ctx, keep_new=False)
 
         assert _read(dep_a.get_install_path(modules)) == "old-a"
         assert _read(dep_b.get_install_path(modules)) == "old-b"
+
+    def test_transitive_dep_not_in_all_apm_deps_still_restores(self, tmp_path: Path) -> None:
+        """A transitive dep's dep_ref is captured directly in update_backups
+        at backup time -- restore must not depend on finding it again via
+        ctx.all_apm_deps (direct-only) or ctx.deps_to_install (only
+        populated on a fully successful resolve). Simulates the exact gap
+        this design closes: resolution failed before deps_to_install was
+        ever set, for a dep that was never a direct dependency at all."""
+        modules = tmp_path / "apm_modules"
+        backup_root = tmp_path / ".apm-update-backup"
+        transitive_dep = _FakeDep("owner/transitive-only")
+        _write(backup_root / "owner_transitive-only", "old")
+        _write(transitive_dep.get_install_path(modules), "new")
+
+        ctx = SimpleNamespace(
+            apm_modules_dir=modules,
+            all_apm_deps=[],  # transitive_dep was never a direct dep
+            deps_to_install=[],  # resolution failed before this was populated
+            callback_downloaded={},
+            update_backups={
+                "owner/transitive-only": (transitive_dep, backup_root / "owner_transitive-only")
+            },
+        )
+
+        restore_update_backups(ctx, keep_new=False)
+
+        assert _read(transitive_dep.get_install_path(modules)) == "old"

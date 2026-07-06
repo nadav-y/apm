@@ -103,12 +103,16 @@ class InstallContext:
     callback_downloaded: dict[str, Any] = field(default_factory=dict)  # resolve
     callback_failures: set[str] = field(default_factory=set)  # resolve
     transitive_failures: list[tuple[str, str]] = field(default_factory=list)  # resolve
-    # dep_key -> backup path for cached semver installs moved aside by
-    # ``update_backup.purge_cached_semver_paths_for_update`` (populated only
-    # when ``plan_callback`` is set). The pipeline calls
-    # ``update_backup.restore_update_backups`` once the plan-confirmation
-    # gate resolves, to either discard these (applied) or restore them
-    # (declined / non-interactive abort / --dry-run).
+    # dep_key -> (dep_ref, backup_path) for install paths moved aside by
+    # ``update_backup.backup_before_overwrite`` immediately before
+    # ``download_callback`` overwrites them during a forced semver re-check
+    # (populated only when ``plan_callback`` is set -- ``apm install
+    # --update`` has no decline path, so nothing is staged for it). Applies
+    # at any depth: a transitive dependency re-checked because its own
+    # reference is a semver range gets backed up exactly like a direct one.
+    # The pipeline calls ``update_backup.restore_update_backups`` once the
+    # plan-confirmation gate resolves, to either discard these (applied) or
+    # restore them (declined / non-interactive abort / --dry-run).
     update_backups: dict[str, Any] = field(default_factory=dict)  # resolve
 
     # ------------------------------------------------------------------
