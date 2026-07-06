@@ -118,6 +118,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apm update` now reconciles MCP and LSP servers after an accepted plan,
   removing stale runtime config and recording newly declared servers.
   (by @cffnpwr, closes #2077, #2085)
+### Fixed
+
+- `apm update` no longer leaves `apm_modules/` silently ahead of
+  `apm.lock.yaml` when the plan-confirmation gate does not commit: declining
+  the prompt, aborting in a non-interactive shell (no TTY, no `--yes`), and
+  `--dry-run` all now leave dependency content untouched. Resolving a semver
+  range re-downloads the candidate version to compute the update plan before
+  the user has confirmed anything; that download is now staged and rolled
+  back unless the update is actually applied. Affects both git-source and
+  registry-source dependencies. (by @nadav-y)
 
 ## [0.24.0] - 2026-07-05
 

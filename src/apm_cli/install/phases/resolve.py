@@ -24,13 +24,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from apm_cli.install.helpers.ref_seed import seed_ref_resolver_from_lockfile
-from apm_cli.install.transaction import resolution_for_context
 from apm_cli.models.apm_package import GitReferenceType, ResolvedReference
 from apm_cli.utils.short_sha import format_short_sha
 
 if TYPE_CHECKING:
     from apm_cli.install.context import InstallContext
-    from apm_cli.install.resolution_staging import ResolutionStagingSession
     from apm_cli.models.dependency.reference import DependencyReference
 
 _logger = logging.getLogger(__name__)
@@ -176,58 +174,6 @@ def _maybe_resolve_git_semver(
         package_name=package_name,
         constraint=constraint,
     )
-
-
-def _purge_cached_semver_paths_for_update(
-    *,
-    all_apm_deps,
-    apm_modules_dir,
-    logger,
-    staging_session: ResolutionStagingSession,
-) -> None:
-    """Pre-purge on-disk install paths for direct git-source and registry semver deps
-    when ``--update`` / ``--refresh`` is set.
-
-    Bug 1 fix (#1496): the BFS resolver short-circuits at
-    ``install_path.exists()`` and never invokes ``download_callback``,
-    which is where ``_maybe_resolve_git_semver`` lives. For git-source
-    semver direct deps we therefore pre-purge the install path so the
-    resolver is forced through the callback, re-runs ``git ls-remote``,
-    and rewrites the lockfile with the latest matching tag. Matches
-    npm / cargo / bundler: ``--update`` is the explicit re-resolve
-    trigger and must not be swallowed by the on-disk cache. Scoped to
-    direct deps to avoid disturbing transitive cached content; the
-    resolver re-walks transitives naturally once a direct dep's
-    callback rewrites its ref. Local and proxy deps are excluded (their
-    semver semantics belong to a different resolver path). Registry semver
-    deps are included: their callback also gates on install_path.exists().
-    """
-    from contextlib import suppress
-
-    from apm_cli.utils.file_ops import robust_rmtree as _rrm
-
-    for _dep in all_apm_deps:
-        if getattr(_dep, "ref_kind", None) != "semver":
-            continue
-        if _dep.is_local:
-            continue
-        if getattr(_dep, "artifactory_prefix", None):
-            continue
-        try:
-            _ip = _dep.get_install_path(apm_modules_dir)
-        except Exception:  # noqa: S112
-            # Path computation failure (e.g. malformed dep) is non-fatal
-            # here -- the resolver will surface a real error downstream.
-            continue
-        if _ip.exists():
-            staging_session.prepare_path(_ip)
-            with suppress(Exception):
-                _rrm(_ip, ignore_errors=True)
-            if logger:
-                logger.verbose_detail(
-                    f"[*] --update: cleared cached install path for "
-                    f"{_dep.get_unique_key()} to force semver re-resolution"
-                )
 
 
 def _load_lockfile(ctx: InstallContext) -> None:
@@ -380,7 +326,7 @@ def _fail_on_resolution_errors(ctx: InstallContext, dependency_graph) -> None:
     raise RuntimeError(f"Dependency resolution failed: {joined_errors}")
 
 
-def _resolve_dependencies(ctx: InstallContext, staging_session: ResolutionStagingSession) -> None:
+def _resolve_dependencies(ctx: InstallContext) -> None:
     """Resolve dependencies and populate the resolution fields on ``ctx``."""
     import threading as _threading
 
@@ -500,7 +446,6 @@ def _resolve_dependencies(ctx: InstallContext, staging_session: ResolutionStagin
             )
             if not _force_semver_resolve:
                 return install_path
-        staging_session.prepare_path(install_path)
         # F1 (#1116): surface a heartbeat BEFORE the network/copy work so
         # users see the install advancing past silent transitive lookups.
         # Under F7's parallel BFS this callback may run on a worker
@@ -759,11 +704,23 @@ def _resolve_dependencies(ctx: InstallContext, staging_session: ResolutionStagin
     # 6. Resolver creation + dependency resolution
     # ------------------------------------------------------------------
     if update_refs:
-        _purge_cached_semver_paths_for_update(
+        # A plan-confirmation gate (``apm update``) can decline after this
+        # point, or the pipeline can abort before ever reaching it
+        # (non-interactive shell, --dry-run) -- stage the purged content
+        # so ``restore_update_backups`` can put it back rather than
+        # leaving apm_modules/ ahead of apm.lock.yaml. Callers with no
+        # gate (``apm install --update``) always apply, so purge-by-delete
+        # is unchanged for them.
+        from .update_backup import purge_cached_semver_paths_for_update
+
+        _backup_root = (
+            ctx.apm_dir / ".apm-update-backup" if getattr(ctx, "plan_callback", None) else None
+        )
+        ctx.update_backups = purge_cached_semver_paths_for_update(
             all_apm_deps=ctx.all_apm_deps,
             apm_modules_dir=ctx.apm_modules_dir,
             logger=ctx.logger,
-            staging_session=staging_session,
+            backup_root=_backup_root,
         )
 
     resolver = APMDependencyResolver(
@@ -994,7 +951,7 @@ def run(ctx: InstallContext) -> None:
     _ensure_modules_dir(ctx)
     _setup_downloader(ctx)
     seed_ref_resolver_from_lockfile(ctx)
-    _resolve_dependencies(ctx, resolution_for_context(ctx))
+    _resolve_dependencies(ctx)
     if ctx.only_packages:
         _apply_only_filter(ctx)
     _compute_intended_dep_keys(ctx)

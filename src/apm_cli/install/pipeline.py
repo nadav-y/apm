@@ -596,6 +596,7 @@ def run_install_pipeline(  # noqa: PLR0913, RUF100
         refresh=refresh,
         lockfile_only=lockfile_only,
         transaction=transaction,
+        plan_callback=plan_callback,
     )
 
     # ------------------------------------------------------------------
@@ -642,13 +643,27 @@ def run_install_pipeline(  # noqa: PLR0913, RUF100
     # collision.
     # ------------------------------------------------------------------
     if plan_callback is not None:
+        from .phases.update_backup import restore_update_backups
         from .plan import build_update_plan
 
         plan = build_update_plan(_early_lockfile, ctx.deps_to_install)
-        proceed = plan_callback(plan)
-        if not proceed:
-            transaction.rollback()
-            return InstallResult(disposition=InstallDisposition.CANCELLED)
+        # Resolve already downloaded/cloned any semver-ranged dep whose
+        # own reference needed re-checking (direct or transitive -- see
+        # APMDependencyResolver._should_force_recheck and
+        # update_backup.backup_before_overwrite, called from resolve.py)
+        # to compute this plan. plan_callback can decline (return False)
+        # or abort the process outright (non-interactive shell ->
+        # SystemExit) -- either way, ``finally`` reconciles
+        # ``ctx.update_backups`` so a declined/aborted/dry-run update
+        # never leaves apm_modules/ ahead of apm.lock.yaml.
+        committed = False
+        try:
+            proceed = plan_callback(plan)
+            if not proceed:
+                return InstallResult()
+            committed = True
+        finally:
+            restore_update_backups(ctx, keep_new=committed)
 
     ctx.tui.__enter__()
     try:
