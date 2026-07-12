@@ -441,7 +441,7 @@ def _transactional_pipeline(run):
 
 
 @_transactional_pipeline
-def run_install_pipeline(  # noqa: PLR0913, RUF100
+def run_install_pipeline(  # noqa: PLR0913, C901, RUF100
     apm_package: APMPackage,
     update_refs: bool = False,
     verbose: bool = False,
