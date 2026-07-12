@@ -43,6 +43,11 @@ KNOWN_LARGE_MODULES = {
     # and canvas integration helpers (canvas PR) merged concurrently.
     # Decomposition tracked as follow-up.
     "services.py": 1100,
+    # pipeline.py grew past 1000 after the staged-rollback fix for apm update
+    # (#2050, #2053) added a resolve-phase exception handler and a plan-gate
+    # try/finally block. Both are orthogonal seams; extraction tracked as
+    # follow-up once the update command matures.
+    "pipeline.py": 1030,
 }
 
 

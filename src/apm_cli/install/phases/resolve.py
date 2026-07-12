@@ -326,7 +326,7 @@ def _fail_on_resolution_errors(ctx: InstallContext, dependency_graph) -> None:
     raise RuntimeError(f"Dependency resolution failed: {joined_errors}")
 
 
-def _resolve_dependencies(ctx: InstallContext) -> None:
+def _resolve_dependencies(ctx: InstallContext) -> None:  # noqa: PLR0915
     """Resolve dependencies and populate the resolution fields on ``ctx``."""
     import threading as _threading
 
@@ -448,6 +448,25 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
             )
             if not _force_semver_resolve:
                 return install_path
+        # Track install_path in the transaction's staging journal so that
+        # a failed install (circular dep, network error, policy violation)
+        # can be fully rolled back via transaction.rollback(). This covers
+        # fresh adds (install_path empty; rollback removes the new content)
+        # and re-resolution of existing paths (rollback restores from staging).
+        # Skip staging when update_backup.backup_before_overwrite has already
+        # staged this dep (update scenario): the two mechanisms are exclusive
+        # for a given dep_key -- the update_backup restore path handles those
+        # deps, and staging would fight it on rollback. The pre-purge path
+        # also sets ctx.update_backups for deps already handled, so we check
+        # that too.
+        _dep_key_for_staging = dep_ref.get_unique_key()
+        _backup_staged = backup_before_overwrite(ctx, dep_ref, install_path)
+        if not _backup_staged and _dep_key_for_staging not in (
+            getattr(ctx, "update_backups", None) or {}
+        ):
+            from apm_cli.install.transaction import resolution_for_context
+
+            resolution_for_context(ctx).prepare_path(install_path)
         # F1 (#1116): surface a heartbeat BEFORE the network/copy work so
         # users see the install advancing past silent transitive lookups.
         # Under F7's parallel BFS this callback may run on a worker
@@ -518,15 +537,8 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
                         )
                         callback_downloaded[dep_ref.get_unique_key()] = None
                         return install_path
-                # Stage a rollback point before extraction overwrites
-                # install_path -- covers this dep whether it's direct or
-                # transitive (see update_backup.backup_before_overwrite).
-                # No-ops when there's nothing to protect (fresh add) or no
-                # plan-confirmation gate to potentially decline. Dict-key
-                # writes on distinct dep keys are GIL-atomic, matching the
-                # lock-free pattern already used for callback_downloaded
-                # elsewhere in this callback.
-                backup_before_overwrite(ctx, dep_ref, install_path)
+                # backup_before_overwrite was already called above before
+                # the heartbeat, so no separate staging call needed here.
                 registry_resolver.download_package(dep_ref, install_path)
                 _annotate_registry_dep_ref(dep_ref, registry_resolver)
                 # Mark as already-downloaded so the parallel pre-download
@@ -643,13 +655,8 @@ def _resolve_dependencies(ctx: InstallContext) -> None:
                 ref_changed=_ref_changed,
             )
 
-            # Stage a rollback point before the clone/cache-copy overwrites
-            # install_path -- covers this dep whether it's direct or
-            # transitive (see update_backup.backup_before_overwrite).
-            # No-ops when there's nothing to protect (fresh add) or no
-            # plan-confirmation gate to potentially decline.
-            backup_before_overwrite(ctx, dep_ref, install_path)
-
+            # backup_before_overwrite was already called above before
+            # the heartbeat, so no separate staging call needed here.
             # Silent download - no progress display for transitive deps
             result = downloader.download_package(download_dep, install_path)
             # Capture resolved commit SHA for lockfile
