@@ -128,15 +128,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the user has confirmed anything; that download is now staged and rolled
   back unless the update is actually applied. Affects both git-source and
   registry-source dependencies. (by @nadav-y) (#2050)
-- `apm update` now re-checks a transitive dependency's own semver range
-  against the remote at any depth, not just for direct dependencies.
-  Previously, `download_callback` only ran for a dependency whose install
-  path didn't already exist, so a transitive dependency already present on
-  disk (e.g. `pkg1 -> pkg2 -> pkg3`, all constrained by `^1.0.0`) never had
-  its own range re-evaluated -- publishing a new matching version of `pkg3`
-  was silently ignored by `apm update` in `pkg1` even though `pkg2`'s
-  manifest allowed it. The staged-download/rollback protection from #2050
-  now applies uniformly at every depth reached this way. (by @nadav-y)
+- `apm update` now re-checks transitive dependencies' own semver ranges at
+  any depth in the dependency tree. Previously, if your project depended on
+  `pkg2` which depended on `pkg3 ^1.0.0`, a new patch release of `pkg3` was
+  silently ignored even when `pkg2`'s constraint allowed it. Now `apm update`
+  re-resolves the full tree, not just direct dependencies. (by @nadav-y)
   (#2053)
 
 ## [0.24.0] - 2026-07-05

@@ -357,7 +357,10 @@ class TestRunInstallPipelineResolveFailureRestoresBackups:
             patch("apm_cli.deps.lockfile.LockFile.read", return_value=None),
             patch("apm_cli.install.context.InstallContext", return_value=mock_ctx),
             patch("apm_cli.utils.install_tui.InstallTui", return_value=MagicMock()),
-            patch("apm_cli.install.phases.resolve", mock_resolve),
+            patch(
+                "apm_cli.install.phases.resolve.run",
+                side_effect=RuntimeError("network error on other dep"),
+            ),
             patch("apm_cli.install.phases.update_backup.restore_update_backups", mock_restore),
         ):
             mock_ctx.tui.__enter__ = MagicMock(return_value=mock_ctx.tui)
@@ -397,7 +400,7 @@ class TestRunInstallPipelineResolveFailureRestoresBackups:
             patch("apm_cli.deps.lockfile.LockFile.read", return_value=None),
             patch("apm_cli.install.context.InstallContext", return_value=mock_ctx),
             patch("apm_cli.utils.install_tui.InstallTui", return_value=MagicMock()),
-            patch("apm_cli.install.phases.resolve", mock_resolve),
+            patch("apm_cli.install.phases.resolve.run", side_effect=RuntimeError("boom")),
             patch("apm_cli.install.phases.update_backup.restore_update_backups", mock_restore),
         ):
             mock_ctx.tui.__enter__ = MagicMock(return_value=mock_ctx.tui)

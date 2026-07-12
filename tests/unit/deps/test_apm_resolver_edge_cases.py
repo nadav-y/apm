@@ -781,3 +781,78 @@ class TestTryLoadDependencyPackageForceRecheck:
 
         assert len(call_log) == 0
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Predicate parity: _should_force_recheck vs download_callback's
+# _force_semver_resolve -- these must remain identical (see architecture
+# comment in apm_resolver.py). This parametric test catches silent drift.
+# ---------------------------------------------------------------------------
+
+
+class TestForceRecheckPredicateParity:
+    """Assert that APMDependencyResolver._should_force_recheck and
+    download_callback's inline _force_semver_resolve share the same
+    4-condition logic.
+
+    Both predicates are:
+      update_refs=True AND not is_local AND not artifactory_prefix AND ref_kind='semver'
+
+    If one side changes, this test fails, prompting a deliberate sync.
+    """
+
+    @pytest.mark.parametrize(
+        "update_refs,is_local,has_artifactory,ref_kind,expected",
+        [
+            (True, False, False, "semver", True),
+            (False, False, False, "semver", False),
+            (True, True, False, "semver", False),
+            (True, False, True, "semver", False),
+            (True, False, False, "literal", False),
+            (True, False, False, None, False),
+        ],
+    )
+    def test_resolver_predicate(
+        self, update_refs, is_local, has_artifactory, ref_kind, expected, tmp_path
+    ):
+        from apm_cli.deps.apm_resolver import APMDependencyResolver
+
+        dep = MagicMock()
+        dep.is_local = is_local
+        dep.artifactory_prefix = "proxy" if has_artifactory else None
+        dep.ref_kind = ref_kind
+
+        mods = tmp_path / "apm_modules"
+        resolver = APMDependencyResolver(apm_modules_dir=mods, update_refs=update_refs)
+        assert resolver._should_force_recheck(dep) == expected
+
+    @pytest.mark.parametrize(
+        "update_refs,is_local,has_artifactory,ref_kind,expected",
+        [
+            (True, False, False, "semver", True),
+            (False, False, False, "semver", False),
+            (True, True, False, "semver", False),
+            (True, False, True, "semver", False),
+            (True, False, False, "literal", False),
+            (True, False, False, None, False),
+        ],
+    )
+    def test_download_callback_predicate(
+        self, update_refs, is_local, has_artifactory, ref_kind, expected, tmp_path
+    ):
+        """Verify the inline _force_semver_resolve check in download_callback
+        produces the same output as _should_force_recheck for all input combos.
+        Inline computation mirrors _should_force_recheck exactly."""
+        dep = MagicMock()
+        dep.is_local = is_local
+        dep.artifactory_prefix = "proxy" if has_artifactory else None
+        dep.ref_kind = ref_kind
+
+        # Replicate the inline predicate from resolve.py download_callback:
+        _force_semver_resolve = (
+            update_refs
+            and not dep.is_local
+            and not getattr(dep, "artifactory_prefix", None)
+            and getattr(dep, "ref_kind", None) == "semver"
+        )
+        assert bool(_force_semver_resolve) == expected

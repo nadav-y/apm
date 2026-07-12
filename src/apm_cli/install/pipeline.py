@@ -674,7 +674,7 @@ def run_install_pipeline(  # noqa: PLR0913, C901, RUF100
         try:
             proceed = plan_callback(plan)
             if not proceed:
-                return InstallResult()
+                return InstallResult(disposition=InstallDisposition.CANCELLED)
             committed = True
         finally:
             restore_update_backups(ctx, keep_new=committed)

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from apm_cli.utils.file_ops import robust_rmtree as _rrm
+from apm_cli.utils.path_security import ensure_path_within
 
 if TYPE_CHECKING:
     from apm_cli.install.context import InstallContext
@@ -108,6 +109,7 @@ def backup_before_overwrite(
     backup_root = ctx.apm_dir / ".apm-update-backup"
     dep_key = dep_ref.get_unique_key()
     backup_path = backup_root / _sanitize_backup_name(dep_key)
+    ensure_path_within(install_path, ctx.apm_modules_dir)
     if backup_path.exists():
         _rrm(backup_path, ignore_errors=True)
     backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +125,9 @@ def backup_before_overwrite(
     # (before deps_to_install is ever set) would otherwise be
     # unresolvable and its backup permanently orphaned.
     ctx.update_backups[dep_key] = (dep_ref, backup_path)
+    _logger = getattr(ctx, "logger", None)
+    if _logger is not None:
+        _logger.verbose_detail(f"[*] --update: staged backup for {dep_key} before re-fetch")
     return True
 
 
@@ -179,25 +184,38 @@ def restore_update_backups(ctx: InstallContext, *, keep_new: bool) -> None:
         }
     )
     apm_modules_dir = ctx.apm_modules_dir
+    _logger = getattr(ctx, "logger", None)
 
+    _restored = 0
+    _discarded = 0
     for _dep_key, _entry in backups.items():
         _dep, _backup_path = _entry
         if keep_new and _dep_key in downloaded:
             # New content committed -- the backup is no longer needed.
-            with suppress(Exception):
+            try:
                 if _backup_path.exists():
                     _rrm(_backup_path, ignore_errors=True)
+                _discarded += 1
+            except Exception as _exc:
+                if _logger is not None:
+                    _logger.verbose_detail(
+                        f"[!] --update: could not discard backup for {_dep_key}: {_exc}"
+                    )
             continue
         # Not committed, or this dep was staged but never actually
         # re-resolved (e.g. an earlier failure aborted the run) -- restore
         # the original content.
-        with suppress(Exception):
+        try:
             _ip = _dep.get_install_path(apm_modules_dir)
             if _ip.exists():
                 _rrm(_ip, ignore_errors=True)
             if _backup_path.exists():
                 _ip.parent.mkdir(parents=True, exist_ok=True)
                 _backup_path.rename(_ip)
+            _restored += 1
+        except Exception as _exc:
+            if _logger is not None:
+                _logger.verbose_detail(f"[!] --update: restore failed for {_dep_key}: {_exc}")
 
     if not keep_new:
         # Freshly-downloaded deps with no prior backup (new adds swept into
@@ -212,6 +230,11 @@ def restore_update_backups(ctx: InstallContext, *, keep_new: bool) -> None:
                 _ip = _dep.get_install_path(apm_modules_dir)
                 if _ip.exists():
                     _rrm(_ip, ignore_errors=True)
+
+    if _logger is not None and backups:
+        _logger.verbose_detail(
+            f"[i] --update: reconciled backups: {_restored} restored, {_discarded} discarded"
+        )
 
     if backups:
         _backup_root = next(iter(backups.values()))[1].parent

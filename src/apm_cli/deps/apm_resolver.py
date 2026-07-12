@@ -1037,6 +1037,10 @@ class APMDependencyResolver:
         # something *above* it in the tree also changed and forced a fresh
         # fetch. download_callback decides internally whether anything
         # actually needs re-fetching; this only controls whether it's asked.
+        # Performance: _should_force_recheck widens the gate for existing
+        # semver paths, but _downloaded_packages (guarded by _download_lock)
+        # ensures each unique (dep_ref, anchor) fires the callback at most
+        # once per resolution run -- no O(N) extra network calls per tree depth.
         if not install_path.exists() or self._should_force_recheck(dep_ref):
             if self._download_callback is not None:
                 unique_key = self._download_dedup_key(dep_ref, parent_pkg)

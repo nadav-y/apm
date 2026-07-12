@@ -91,7 +91,11 @@ class TestBackupBeforeOverwrite:
     exists, not on knowing the tree shape upfront."""
 
     def _ctx(self, *, apm_dir: Path, plan_callback=True):
-        return SimpleNamespace(apm_dir=apm_dir, plan_callback=plan_callback)
+        return SimpleNamespace(
+            apm_dir=apm_dir,
+            apm_modules_dir=apm_dir / "apm_modules",
+            plan_callback=plan_callback,
+        )
 
     def test_no_plan_callback_is_a_noop(self, tmp_path: Path) -> None:
         """apm install --update has no decline path -- nothing to protect
